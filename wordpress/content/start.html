@@ -1,0 +1,26 @@
+<p>[example_role_badge]</p>
+
+<h2>Public</h2>
+<p>This section is visible to everyone, including access level <code>none</code>. The page is cached exactly once per access level, never per person.</p>
+
+[example_role_content only="none"]
+<p><strong>You are not logged in, or you have no access level.</strong></p>
+<p>[example_login_link text="Log in now"]</p>
+[/example_role_content]
+
+[example_role_content min="limited"]
+<h2>From level limited</h2>
+<p>This section is visible to <code>limited</code> and <code>full</code>.</p>
+[/example_role_content]
+
+[example_role_content only="limited"]
+<p>You have limited access. Full access requires level <code>full</code>.</p>
+[/example_role_content]
+
+[example_role_content min="full"]
+<h2>Level full only</h2>
+<p>Exclusive content for <code>full</code>. See also the <a href="/members/">members area</a>.</p>
+[/example_role_content]
+
+<hr>
+<p><small>WordPress only knows the <code>X-Example-Role</code> header. There is no user account, no session cookie and no personalisation here. If you are logged in at the IdP: [example_logout_link text="Log out"]</small></p>
