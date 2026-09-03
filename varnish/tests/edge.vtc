@@ -1,0 +1,225 @@
+varnishtest "Edge: role from the session JWT, header hygiene, cache per role"
+
+# The tokens below are HS256 JWTs signed with the test key "test-session-key":
+#   FULL / LIMITED   valid until 2100, typ example-session+jwt
+#   UNKNOWN_ROLE     valid signature, role "admin" (must become none)
+#   EXPIRED          valid signature, expired in 2000
+#   AUTHSTATE        same key, typ example-authstate+jwt (must be rejected)
+#   TAMPERED         payload changed after signing
+# Regenerate with jose from auth/ if the token format changes.
+
+# WordPress mock. Requests arrive in the order of the client blocks below (misses and passes only).
+server s1 {
+    # c1: anonymous
+    rxreq
+    expect req.url == "/"
+    expect req.http.X-Example-Role == "none"
+    expect req.http.X-Edge-Secret == "test-edge-secret"
+    expect req.http.Cookie == <undef>
+    expect req.http.X-Session-State == <undef>
+    expect req.http.X-JWT-Claims == <undef>
+    expect req.http.X-Cache-Key == <undef>
+    txresp -hdr "Cache-Control: public, s-maxage=60" -hdr "Set-Cookie: wordpress_test_cookie=1; path=/" -body "role=none"
+
+    # c3: valid full JWT; the other cookie is kept, the edge cookies are stripped
+    rxreq
+    expect req.url == "/"
+    expect req.http.X-Example-Role == "full"
+    expect req.http.Cookie == "other=1"
+    txresp -hdr "Cache-Control: public, s-maxage=60" -body "role=full"
+
+    # c4: valid limited JWT
+    rxreq
+    expect req.http.X-Example-Role == "limited"
+    txresp -hdr "Cache-Control: public, s-maxage=60" -body "role=limited"
+
+    # c6: asset, requested with a full JWT, cached without the role
+    rxreq
+    expect req.url == "/wp-content/x.css"
+    expect req.http.X-Example-Role == "full"
+    txresp -hdr "Cache-Control: public, max-age=300" -body "css"
+
+    # c7: wp-admin is passed; Set-Cookie must survive
+    rxreq
+    expect req.url == "/wp-admin/"
+    txresp -status 302 -hdr "Location: /wp-login.php" -hdr "Set-Cookie: wordpress_test_cookie=1; path=/"
+
+    # c9: POST is passed
+    rxreq
+    expect req.method == "POST"
+    expect req.http.X-Example-Role == "none"
+    txresp -body "posted"
+
+    # c10: logged-in WordPress editor is passed, WP cookie forwarded, edge cookie stripped
+    rxreq
+    expect req.http.Cookie == "wordpress_logged_in_x=1"
+    expect req.http.X-Example-Role == "full"
+    txresp -body "editor"
+
+    # c11: private response is not cached
+    rxreq
+    expect req.url == "/private"
+    txresp -hdr "Cache-Control: private, max-age=100" -body "private"
+} -start
+
+# Auth service mock
+server s2 {
+    rxreq
+    expect req.url == "/auth/login?return=/"
+    expect req.http.Cookie == "example_session=abc"
+    expect req.http.X-Example-Role == <undef>
+    expect req.http.X-Edge-Secret == <undef>
+    txresp -status 302 -hdr "Location: http://idp/authorize" -hdr "Set-Cookie: example_auth=state; Path=/; HttpOnly" -hdr "Cache-Control: no-store"
+} -start
+
+varnish v1 -vcl {
+    backend wordpress { .host = "${s1_addr}"; .port = "${s1_port}"; }
+    backend auth { .host = "${s2_addr}"; .port = "${s2_port}"; }
+
+    include "${testdir}/../edge.vcl";
+
+    sub edge_config {
+        var.set("session_key", "test-session-key");
+        var.set("edge_secret", "test-edge-secret");
+    }
+} -start
+
+# 1. Anonymous: MISS then HIT, forged headers are ignored, Set-Cookie is stripped
+client c1 {
+    txreq -url "/"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.X-Cache == "MISS"
+    expect resp.http.X-Example-Role == "none"
+    expect resp.http.X-Cache-Key ~ "^none[|].*[|]/$"
+    expect resp.http.Set-Cookie == <undef>
+    expect resp.body == "role=none"
+
+    txreq -url "/" -hdr "X-Example-Role: full" -hdr "X-Edge-Secret: guess"
+    rxresp
+    expect resp.http.X-Cache == "HIT"
+    expect resp.http.X-Example-Role == "none"
+    expect resp.body == "role=none"
+} -run
+
+# 2. Bogus, tampered, wrong-typ and unknown-role tokens all yield none (and hit the anonymous entry)
+client c2 {
+    txreq -url "/" -hdr "Cookie: example_session=abc.def.ghi"
+    rxresp
+    expect resp.http.X-Cache == "HIT"
+    expect resp.http.X-Example-Role == "none"
+
+    txreq -url "/" -hdr "Cookie: example_session=eyJhbGciOiJIUzI1NiIsInR5cCI6ImV4YW1wbGUtc2Vzc2lvbitqd3QifQ.eyJyb2xlIjoiZnVsbCIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAxfQ.HONp2x8SxtgnSjb9GWclTEupqT6jnlUDG7K5MYcMwm4"
+    rxresp
+    expect resp.http.X-Cache == "HIT"
+    expect resp.http.X-Example-Role == "none"
+
+    txreq -url "/" -hdr "Cookie: example_session=eyJhbGciOiJIUzI1NiIsInR5cCI6ImV4YW1wbGUtYXV0aHN0YXRlK2p3dCJ9.eyJyb2xlIjoiZnVsbCIsInN0IjoicyIsImV4cCI6NDEwMjQ0NDgwMH0.Nvawn9m1iu1Xsh5XLFAb5_XBS4EIiUEHjxV6FDiUy0M"
+    rxresp
+    expect resp.http.X-Cache == "HIT"
+    expect resp.http.X-Example-Role == "none"
+
+    txreq -url "/" -hdr "Cookie: example_session=eyJhbGciOiJIUzI1NiIsInR5cCI6ImV4YW1wbGUtc2Vzc2lvbitqd3QifQ.eyJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6NDEwMjQ0NDgwMH0.bAWLYC_nyjjBKvAEsjAd6U7_mRa8Qgrt3vBzp13KTHs"
+    rxresp
+    expect resp.http.X-Cache == "HIT"
+    expect resp.http.X-Example-Role == "none"
+} -run
+
+# 3. Valid full JWT: own cache entry, second request is a HIT
+client c3 {
+    txreq -url "/" -hdr "Cookie: other=1; example_session=eyJhbGciOiJIUzI1NiIsInR5cCI6ImV4YW1wbGUtc2Vzc2lvbitqd3QifQ.eyJyb2xlIjoiZnVsbCIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.HONp2x8SxtgnSjb9GWclTEupqT6jnlUDG7K5MYcMwm4"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.X-Cache == "MISS"
+    expect resp.http.X-Example-Role == "full"
+    expect resp.http.X-Cache-Key ~ "^full[|]"
+    expect resp.body == "role=full"
+
+    txreq -url "/" -hdr "Cookie: example_session=eyJhbGciOiJIUzI1NiIsInR5cCI6ImV4YW1wbGUtc2Vzc2lvbitqd3QifQ.eyJyb2xlIjoiZnVsbCIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.HONp2x8SxtgnSjb9GWclTEupqT6jnlUDG7K5MYcMwm4"
+    rxresp
+    expect resp.http.X-Cache == "HIT"
+    expect resp.http.X-Example-Role == "full"
+    expect resp.body == "role=full"
+} -run
+
+# 4. Valid limited JWT: separate entry
+client c4 {
+    txreq -url "/" -hdr "Cookie: example_session=eyJhbGciOiJIUzI1NiIsInR5cCI6ImV4YW1wbGUtc2Vzc2lvbitqd3QifQ.eyJyb2xlIjoibGltaXRlZCIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.IBzQrKg9lg2DvUGOSUg4oF5QGCMc_Qq_iHwOZNu6bvI"
+    rxresp
+    expect resp.http.X-Cache == "MISS"
+    expect resp.http.X-Example-Role == "limited"
+    expect resp.body == "role=limited"
+} -run
+
+# 5. Expired JWT: HTML navigation is redirected to the silent refresh, other requests get none
+client c5 {
+    txreq -url "/p?a=1&b=2" -hdr "Cookie: example_session=eyJhbGciOiJIUzI1NiIsInR5cCI6ImV4YW1wbGUtc2Vzc2lvbitqd3QifQ.eyJyb2xlIjoiZnVsbCIsImlhdCI6OTQ2Njg0ODAwLCJleHAiOjk0NjY4ODQwMH0.I1jkatqFmUnRxJHs5yhP4DQ70T0yY0e8Jgw0_qkjX3E" -hdr "Accept: text/html,*/*"
+    rxresp
+    expect resp.status == 302
+    expect resp.http.Location == "/auth/refresh?return=/p%3Fa%3D1%26b%3D2"
+    expect resp.http.Cache-Control == "no-store"
+    expect resp.http.X-Cache == "REFRESH"
+
+    txreq -url "/" -hdr "Cookie: example_session=eyJhbGciOiJIUzI1NiIsInR5cCI6ImV4YW1wbGUtc2Vzc2lvbitqd3QifQ.eyJyb2xlIjoiZnVsbCIsImlhdCI6OTQ2Njg0ODAwLCJleHAiOjk0NjY4ODQwMH0.I1jkatqFmUnRxJHs5yhP4DQ70T0yY0e8Jgw0_qkjX3E" -hdr "Accept: */*"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.X-Cache == "HIT"
+    expect resp.http.X-Example-Role == "none"
+} -run
+
+# 6. Assets do not vary by role
+client c6 {
+    txreq -url "/wp-content/x.css" -hdr "Cookie: example_session=eyJhbGciOiJIUzI1NiIsInR5cCI6ImV4YW1wbGUtc2Vzc2lvbitqd3QifQ.eyJyb2xlIjoiZnVsbCIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.HONp2x8SxtgnSjb9GWclTEupqT6jnlUDG7K5MYcMwm4"
+    rxresp
+    expect resp.http.X-Cache == "MISS"
+    expect resp.http.X-Cache-Key ~ "^-[|]"
+
+    txreq -url "/wp-content/x.css"
+    rxresp
+    expect resp.http.X-Cache == "HIT"
+    expect resp.http.X-Example-Role == "none"
+    expect resp.body == "css"
+} -run
+
+# 7. wp-admin bypasses the cache and keeps Set-Cookie
+client c7 {
+    txreq -url "/wp-admin/"
+    rxresp
+    expect resp.status == 302
+    expect resp.http.X-Cache == "BYPASS(path)"
+    expect resp.http.Set-Cookie ~ "wordpress_test_cookie"
+    expect resp.http.X-Cache-Key == <undef>
+} -run
+
+# 8. /auth/* goes to the auth backend, uncached, cookies untouched
+client c8 {
+    txreq -url "/auth/login?return=/" -hdr "Cookie: example_session=abc" -hdr "X-Example-Role: full"
+    rxresp
+    expect resp.status == 302
+    expect resp.http.X-Cache == "BYPASS(auth)"
+    expect resp.http.Set-Cookie ~ "example_auth"
+} -run
+
+# 9. Non-GET bypasses the cache
+client c9 {
+    txreq -req POST -url "/" -body "x=1"
+    rxresp
+    expect resp.http.X-Cache == "BYPASS(method)"
+    expect resp.body == "posted"
+} -run
+
+# 10. Logged-in WordPress editors bypass the cache
+client c10 {
+    txreq -url "/" -hdr "Cookie: wordpress_logged_in_x=1; example_session=eyJhbGciOiJIUzI1NiIsInR5cCI6ImV4YW1wbGUtc2Vzc2lvbitqd3QifQ.eyJyb2xlIjoiZnVsbCIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.HONp2x8SxtgnSjb9GWclTEupqT6jnlUDG7K5MYcMwm4"
+    rxresp
+    expect resp.http.X-Cache == "BYPASS(wp-login-cookie)"
+    expect resp.body == "editor"
+} -run
+
+# 11. Private responses are not stored
+client c11 {
+    txreq -url "/private"
+    rxresp
+    expect resp.http.X-Cache == "UNCACHEABLE"
+    expect resp.body == "private"
+} -run

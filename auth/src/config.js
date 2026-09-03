@@ -1,8 +1,8 @@
 // Central configuration from environment variables.
 //
-// OIDC endpoints come from discovery on OIDC_ISSUER. Locally the browser and the edge container
-// must therefore reach the IdP under the same URL; docker-compose.yml maps auth.localhost to the
-// Docker host inside the edge container for that (extra_hosts).
+// OIDC endpoints come from discovery on OIDC_ISSUER. Locally the browser and this container must
+// therefore reach the IdP under the same URL; docker-compose.yml maps auth.localhost to the
+// Docker host inside the container for that (extra_hosts).
 
 function env(name, fallback) {
   const value = process.env[name];
@@ -24,14 +24,9 @@ export function normalizeRole(value) {
 }
 
 export const config = {
-  port: Number(env('PORT', '8000')),
+  port: Number(env('PORT', '3000')),
   publicUrl,
   secureCookies: publicUrl.startsWith('https://'),
-
-  origin: {
-    url: stripSlash(env('ORIGIN_URL')),
-    sharedSecret: env('EDGE_SHARED_SECRET'),
-  },
 
   oidc: {
     issuer: stripSlash(env('OIDC_ISSUER')),
@@ -51,10 +46,5 @@ export const config = {
     authStateTtlSeconds: 300,
   },
 
-  cache: {
-    defaultTtlSeconds: Number(env('DEFAULT_CACHE_TTL_SECONDS', '60')),
-  },
-
-  debug: env('EDGE_DEBUG', '0') === '1',
   debugClaims: env('DEBUG_CLAIMS', '0') === '1',
 };

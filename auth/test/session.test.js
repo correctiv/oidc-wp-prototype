@@ -1,7 +1,7 @@
 import './_env.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mintAuthState, mintSession, parseCookies, safeReturnPath, stripCookies, verifyAuthState, verifySession } from '../src/session.js';
+import { mintAuthState, mintSession, parseCookies, safeReturnPath, verifyAuthState, verifySession } from '../src/session.js';
 
 test('session: mint and verify return the role', async () => {
   const token = await mintSession('full');
@@ -64,11 +64,4 @@ test('parseCookies: parses a Cookie header', () => {
   assert.deepEqual(parseCookies('a=1; example_session=x.y.z; b=2'), { a: '1', example_session: 'x.y.z', b: '2' });
   assert.deepEqual(parseCookies(undefined), {});
   assert.deepEqual(parseCookies('junk; a=1'), { a: '1' });
-});
-
-test('stripCookies: removes edge cookies, keeps the rest', () => {
-  assert.equal(stripCookies('a=1; example_session=xyz; b=2', ['example_session']), 'a=1; b=2');
-  assert.equal(stripCookies('example_session=xyz', ['example_session']), null);
-  assert.equal(stripCookies(null, ['example_session']), null);
-  assert.equal(stripCookies('example_auth=1; example_session=2', ['example_session', 'example_auth']), null);
 });

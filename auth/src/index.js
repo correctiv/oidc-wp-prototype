@@ -1,16 +1,14 @@
-// Edge prototype: OIDC relying party + role-based cache in front of WordPress.
+// Auth service: the OIDC relying party behind Varnish. Varnish routes /auth/* here uncached and
+// handles everything else itself (role from the session cookie, X-Example-Role, cache per role).
 //
 //   /auth/login     start the login at the IdP
 //   /auth/refresh   silent re-login (prompt=none) after the role JWT expired
 //   /auth/callback  exchange the code for an id_token, extract the role, set the session cookie
 //   /auth/logout    delete the session cookie, RP-initiated logout at the IdP
-//   /_edge/cache    debug view of the cache (prototype only)
-//   *               proxy to WordPress with X-Example-Role and a cache per role
 
 import express from 'express';
 import { config } from './config.js';
 import { buildLogoutUrl, completeLogin, createAuthRequest, getOidcConfig } from './oidc.js';
-import { cache, handleProxy } from './proxy.js';
 import {
   AUTH_COOKIE,
   SESSION_COOKIE,
@@ -28,13 +26,11 @@ app.set('etag', false);
 
 const str = (v) => (typeof v === 'string' ? v : undefined);
 
-// Nothing under /auth/* or /_edge/* may be cached anywhere.
-const noStore = (req, res, next) => {
+// Nothing this service answers may be cached anywhere.
+app.use((req, res, next) => {
   res.set('Cache-Control', 'no-store');
   next();
-};
-app.use('/auth', noStore);
-app.use('/_edge', noStore);
+});
 
 async function startAuth(req, res, { silent }) {
   const returnTo = safeReturnPath(str(req.query.return));
@@ -100,24 +96,14 @@ app.get('/auth/logout', async (req, res) => {
   res.redirect(302, await buildLogoutUrl(`${config.publicUrl}/`));
 });
 
-if (config.debug) {
-  app.get('/_edge/cache', (req, res) => res.json({ entries: cache.snapshot() }));
-  app.delete('/_edge/cache', (req, res) => {
-    cache.clear();
-    res.json({ cleared: true });
-  });
-}
-
-app.all('/{*path}', handleProxy);
-
 // Express 5 forwards rejected promises here.
 app.use((err, req, res, next) => {
-  console.error(`[edge] unhandled error: ${err.message}`);
+  console.error(`[auth] unhandled error: ${err.message}`);
   res.status(500).set('Cache-Control', 'no-store').type('text/plain').send('500 Internal Server Error');
 });
 
 app.listen(config.port, () => {
-  console.log(`[edge] listening on :${config.port}, public=${config.publicUrl}, origin=${config.origin.url}, issuer=${config.oidc.issuer}`);
+  console.log(`[auth] listening on :${config.port}, public=${config.publicUrl}, issuer=${config.oidc.issuer}`);
   // Warm up discovery; failures are logged only, the first request retries.
   getOidcConfig().catch((err) => console.warn(`[oidc] discovery not yet possible: ${err.message}`));
 });

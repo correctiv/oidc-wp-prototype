@@ -10,7 +10,7 @@
 //   node scripts/login-flow.mjs refresh-fail anna --wait 7 # login, end the IdP session, let the JWT expire -> none
 //
 // The refresh scenarios need a short JWT lifetime, e.g.:
-//   SESSION_TTL_SECONDS=5 docker compose up -d edge
+//   SESSION_TTL_SECONDS=5 docker compose up -d auth
 //
 // Note: Keycloak sets Secure cookies on *.localhost (browsers treat *.localhost as a secure
 // context). curl drops such cookies over http, which is why this script exists instead of curl.

@@ -1,8 +1,8 @@
 {
-  "name": "example-edge",
+  "name": "example-auth",
   "version": "0.1.0",
   "private": true,
-  "description": "Edge prototype: OIDC relying party + role-based cache in front of WordPress",
+  "description": "Auth service: OIDC relying party that mints the role cookie; Varnish does the caching",
   "type": "module",
   "engines": { "node": ">=22" },
   "scripts": {

@@ -1,7 +1,8 @@
 # Prototype: OIDC login with role-based edge caching for WordPress
 #
-#   Browser ──► www.localhost:8000 (edge) ──► wordpress:80 ──► db
-#      └──────► auth.localhost:8080 (keycloak)   ◄── edge (via extra_hosts → Docker host)
+#   Browser ──► www.localhost:8000 (varnish) ──► wordpress:80 ──► db
+#                        └── /auth/* ──► auth:3000 (Express, OIDC relying party)
+#      └──────► auth.localhost:8080 (keycloak)   ◄── auth service (via extra_hosts → Docker host)
 #
 # WordPress is additionally exposed on localhost:8081, only to show that
 # direct access without the edge is rejected with 403.
@@ -18,11 +19,6 @@ x-wp-env: &wp-env
     define('EDGE_SHARED_SECRET', '${EDGE_SHARED_SECRET:-edge-to-origin-demo-secret}');
     define('EXAMPLE_ROLE_CACHE_TTL', 60);
     define('DISABLE_WP_CRON', true);
-    // Standard reverse-proxy recipe: WP should see the host the browser uses.
-    // These headers are guaranteed to come from the edge because edge-guard.php rejects everything else.
-    // ($$ is Compose escaping for a literal $.)
-    if (!empty($$_SERVER['HTTP_X_FORWARDED_HOST'])) { $$_SERVER['HTTP_HOST'] = $$_SERVER['HTTP_X_FORWARDED_HOST']; }
-    if (!empty($$_SERVER['HTTP_X_FORWARDED_PROTO']) && $$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') { $$_SERVER['HTTPS'] = 'on'; }
 
 x-wp-volumes: &wp-volumes
   - wp-data:/var/www/html
@@ -95,36 +91,46 @@ services:
       # No persistence: the realm is imported fresh on every start (dev mode, H2 inside the container).
       - ./keycloak:/opt/keycloak/data/import:ro
 
-  edge:
-    build: ./edge
+  # OIDC relying party. Only reachable through Varnish (/auth/*), no published port.
+  auth:
+    build: ./auth
     command: ["node", "--watch", "src/index.js"]
-    ports:
-      - "8000:8000"
     depends_on:
-      - wordpress
       - keycloak
     environment:
-      PORT: "8000"
+      PORT: "3000"
       PUBLIC_URL: http://www.localhost:8000
-      ORIGIN_URL: http://wordpress
       OIDC_ISSUER: http://auth.localhost:8080/realms/example
       OIDC_CLIENT_ID: example-web
       OIDC_CLIENT_SECRET: ${CLIENT_SECRET:-example-web-demo-secret}
       OIDC_ROLE_CLAIM: example_role
       SESSION_SECRET: ${SESSION_SECRET:-demo-session-secret-please-change-0123456789abcdef}
-      EDGE_SHARED_SECRET: ${EDGE_SHARED_SECRET:-edge-to-origin-demo-secret}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-900}
       SESSION_COOKIE_MAX_AGE_SECONDS: ${SESSION_COOKIE_MAX_AGE_SECONDS:-43200}
-      DEFAULT_CACHE_TTL_SECONDS: ${DEFAULT_CACHE_TTL_SECONDS:-60}
-      EDGE_DEBUG: "1"
       DEBUG_CLAIMS: "1"
     # Inside the container, auth.localhost resolves to the Docker host, where Keycloak's port 8080
-    # is published. The edge therefore uses the same IdP URL as the browser and openid-client's
+    # is published. The service therefore uses the same IdP URL as the browser and openid-client's
     # strict issuer check during discovery passes.
     extra_hosts:
       - "auth.localhost:host-gateway"
     volumes:
-      - ./edge/src:/app/src:ro
+      - ./auth/src:/app/src:ro
+
+  # The edge: Varnish verifies the session JWT in VCL, sets X-Example-Role, caches per role.
+  varnish:
+    build: ./varnish
+    # Extra varnishd parameters; the entrypoint adds the standard ones.
+    command: ["-p", "default_ttl=${DEFAULT_CACHE_TTL_SECONDS:-60}"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      - wordpress
+      - auth
+    environment:
+      VARNISH_HTTP_PORT: "8000"
+      VARNISH_SIZE: 100M
+      SESSION_SECRET: ${SESSION_SECRET:-demo-session-secret-please-change-0123456789abcdef}
+      EDGE_SHARED_SECRET: ${EDGE_SHARED_SECRET:-edge-to-origin-demo-secret}
 
 volumes:
   db-data:

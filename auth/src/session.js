@@ -1,8 +1,8 @@
 // Session JWT and auth-state JWT.
 //
 // The session JWT is the only thing the browser receives for the site. It contains the role and
-// timestamps, nothing else: no user id, no email, no IdP token. Signed with HS256 using an
-// edge-owned secret the IdP does not know.
+// timestamps, nothing else: no user id, no email, no IdP token. Signed with HS256 using a secret
+// shared only between this service and Varnish (which verifies it in VCL); the IdP does not know it.
 
 import { SignJWT, jwtVerify, errors } from 'jose';
 import { config, normalizeRole } from './config.js';
@@ -106,17 +106,3 @@ export function parseCookies(cookieHeader) {
   return out;
 }
 
-/** Removes the named cookies from a Cookie header. Returns null if nothing is left. */
-export function stripCookies(cookieHeader, names) {
-  if (!cookieHeader) return null;
-  const kept = cookieHeader
-    .split(';')
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0)
-    .filter((part) => {
-      const eq = part.indexOf('=');
-      const name = eq === -1 ? part : part.slice(0, eq);
-      return !names.includes(name);
-    });
-  return kept.length > 0 ? kept.join('; ') : null;
-}
