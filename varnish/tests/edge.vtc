@@ -14,7 +14,6 @@ server s1 {
     rxreq
     expect req.url == "/"
     expect req.http.X-Example-Role == "none"
-    expect req.http.X-Edge-Secret == "test-edge-secret"
     expect req.http.Cookie == <undef>
     expect req.http.X-Session-State == <undef>
     expect req.http.X-JWT-Claims == <undef>
@@ -68,7 +67,6 @@ server s2 {
     expect req.url == "/auth/login?return=/"
     expect req.http.Cookie == "example_session=abc"
     expect req.http.X-Example-Role == <undef>
-    expect req.http.X-Edge-Secret == <undef>
     txresp -status 302 -hdr "Location: http://idp/authorize" -hdr "Set-Cookie: example_auth=state; Path=/; HttpOnly" -hdr "Cache-Control: no-store"
 } -start
 
@@ -80,7 +78,6 @@ varnish v1 -vcl {
 
     sub edge_config {
         var.set("session_key", "test-session-key");
-        var.set("edge_secret", "test-edge-secret");
     }
 } -start
 
@@ -95,7 +92,7 @@ client c1 {
     expect resp.http.Set-Cookie == <undef>
     expect resp.body == "role=none"
 
-    txreq -url "/" -hdr "X-Example-Role: full" -hdr "X-Edge-Secret: guess"
+    txreq -url "/" -hdr "X-Example-Role: full"
     rxresp
     expect resp.http.X-Cache == "HIT"
     expect resp.http.X-Example-Role == "none"

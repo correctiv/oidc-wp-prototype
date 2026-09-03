@@ -4,8 +4,9 @@
 #                        └── /auth/* ──► auth:3000 (Express, OIDC relying party)
 #      └──────► auth.localhost:8080 (keycloak)   ◄── auth service (via extra_hosts → Docker host)
 #
-# WordPress is additionally exposed on localhost:8081, only to show that
-# direct access without the edge is rejected with 403.
+# WordPress has no published port: it is only reachable through Varnish on the Docker network.
+# In production the same must hold via firewall / private network, otherwise X-Example-Role
+# could be forged by talking to WordPress directly.
 
 x-wp-env: &wp-env
   WORDPRESS_DB_HOST: db
@@ -16,14 +17,12 @@ x-wp-env: &wp-env
   WORDPRESS_CONFIG_EXTRA: |
     define('WP_HOME', 'http://www.localhost:8000');
     define('WP_SITEURL', 'http://www.localhost:8000');
-    define('EDGE_SHARED_SECRET', '${EDGE_SHARED_SECRET:-edge-to-origin-demo-secret}');
     define('EXAMPLE_ROLE_CACHE_TTL', 60);
     define('DISABLE_WP_CRON', true);
 
 x-wp-volumes: &wp-volumes
   - wp-data:/var/www/html
   - ./wordpress/plugins/example-role:/var/www/html/wp-content/plugins/example-role
-  - ./wordpress/mu-plugins:/var/www/html/wp-content/mu-plugins
 
 services:
   db:
@@ -46,8 +45,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      - "8081:80"
     environment:
       <<: *wp-env
     volumes: *wp-volumes
@@ -68,7 +65,6 @@ services:
     volumes:
       - wp-data:/var/www/html
       - ./wordpress/plugins/example-role:/var/www/html/wp-content/plugins/example-role
-      - ./wordpress/mu-plugins:/var/www/html/wp-content/mu-plugins
       - ./wordpress/init.sh:/init.sh:ro
       - ./wordpress/content:/content:ro
     entrypoint: ["bash", "/init.sh"]
@@ -130,7 +126,6 @@ services:
       VARNISH_HTTP_PORT: "8000"
       VARNISH_SIZE: 100M
       SESSION_SECRET: ${SESSION_SECRET:-demo-session-secret-please-change-0123456789abcdef}
-      EDGE_SHARED_SECRET: ${EDGE_SHARED_SECRET:-edge-to-origin-demo-secret}
 
 volumes:
   db-data:

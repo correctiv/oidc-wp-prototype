@@ -15,7 +15,7 @@ Browser ──► www.localhost:8000  Varnish ───────────�
 1. **WordPress is not an OIDC client.** A small auth service is the relying party (built on [openid-client](https://github.com/panva/openid-client)) and serves `/auth/*`. The `id_token` never leaves it.
 2. **The IdP token never goes into the cookie.** The auth service mints a minimal JWT with `role`, `iat`, `exp`. No `sub`, no email. CDN and Varnish logs therefore contain no PII either.
 3. **Varnish is the only thing in front of WordPress.** It verifies the JWT in VCL (HMAC-SHA256), sets `X-Example-Role`, strips the edge cookies towards the origin and drops `Set-Cookie` from cacheable responses. Whatever the client claims about its role is discarded.
-4. **Origin protection.** WordPress only accepts requests carrying a valid `X-Edge-Secret` (mu-plugin, cannot be deactivated). Direct access yields 403.
+4. **WordPress is only reachable through Varnish.** In the compose stack it has no published port; in production a firewall or private network must guarantee the same. Otherwise `X-Example-Role` could be forged by talking to WordPress directly.
 5. **Role in the hash, not in `Vary`.** `vcl_hash` adds the role; static assets share one entry across roles.
 6. **Short role lifetime, silent refresh.** The role JWT lives 15 minutes. After that Varnish sends one `prompt=none` round trip via the auth service; if the IdP session is still alive the user notices nothing. Otherwise they fall back cleanly to `none`.
 
@@ -34,7 +34,6 @@ docker compose logs -f wp-init keycloak   # wait for "[wp-init] done" and "Keycl
 | Site (through Varnish) | http://www.localhost:8000 | |
 | Keycloak admin | http://auth.localhost:8080/admin/ | `admin` / `admin` |
 | WordPress admin (through Varnish) | http://www.localhost:8000/wp-admin/ | `admin` / `admin` |
-| WordPress directly (only to demo the 403) | http://localhost:8081 | |
 
 Chrome, Firefox and Linux with systemd-resolved resolve `*.localhost` to 127.0.0.1 on their own. If not: add `127.0.0.1 www.localhost auth.localhost` to `/etc/hosts`.
 
@@ -58,7 +57,7 @@ Chrome, Firefox and Linux with systemd-resolved resolve `*.localhost` to 127.0.0
 ### Automated checks
 
 ```bash
-scripts/demo.sh                 # curl checks (cache, header hygiene, 403, PKCE) + login/logout flows for all users
+scripts/demo.sh                 # curl checks (cache, header hygiene, PKCE) + login/logout flows for all users
 scripts/demo.sh --with-refresh  # additionally silent refresh and the refresh failure case (auth service briefly runs with a 5s JWT)
 scripts/varnishtest.sh          # VCL tests (varnish/tests/edge.vtc) with mocked WordPress and auth backends
 node scripts/login-flow.mjs login anna   # a single flow, shows every redirect hop
@@ -105,7 +104,7 @@ sequenceDiagram
     alt cache HIT
         V->>B: 200 from cache, X-Cache: HIT
     else MISS
-        V->>W: GET /members/<br/>X-Example-Role: full, X-Edge-Secret, without example_session
+        V->>W: GET /members/<br/>X-Example-Role: full, without example_session
         W->>V: 200, Cache-Control: public, s-maxage=60
         V->>V: drop Set-Cookie, store
         V->>B: 200, X-Cache: MISS
@@ -139,23 +138,22 @@ sequenceDiagram
 | Step | Behaviour |
 | --- | --- |
 | Role | `edge_role_from_cookie`: split the JWT, pin `alg`/`typ`, compare `digest.hmac_sha256` with the base64url-decoded signature (via `vmod_blob`), check `exp`, whitelist the role. Missing, invalid, tampered → `none`. Expired + HTML navigation → `synth(752)` → 302 to `/auth/refresh`. |
-| Request hygiene | Discard `X-Example-Role`, `X-Edge-Secret`, `X-Forwarded-*` from the client. `cookie.filter` removes `example_session`/`example_auth`. Then set the edge's own values. Internal working headers are unset in `vcl_backend_fetch`. |
+| Request hygiene | Discard `X-Example-Role` and `X-Forwarded-*` from the client. `cookie.filter` removes `example_session`/`example_auth`. Then set `X-Example-Role` from the verified JWT. Internal working headers are unset in `vcl_backend_fetch`. |
 | Routing | `/auth/*` → backend `auth`, always `pass`, cookies untouched. Everything else → backend `wordpress`. |
 | Bypass | Anything but GET/HEAD, `/wp-admin`, `/wp-login.php`, `/wp-cron.php`, `/xmlrpc.php`, or a `wordpress_logged_in_*` cookie (WP editors). Other cookies do not prevent caching. |
 | Hash | `url` + `Host` + role; under `/wp-content/` and `/wp-includes/` without the role. |
 | Store | `vcl_backend_response` drops `Set-Cookie` on cacheable fetches (logged via `std.log`) and turns non-200 into a short hit-for-miss. TTL from `s-maxage`/`max-age`, else `default_ttl` (60 s). The built-in VCL still handles `private`/`no-store`. |
 | Debug headers | `X-Cache: HIT\|MISS\|UNCACHEABLE\|BYPASS(reason)\|REFRESH`, `X-Example-Role`, `X-Cache-Key`, plus Varnish's own `Age` and `Via`. |
 
-Secrets enter the VCL through `config.vcl`, rendered from `SESSION_SECRET` and `EDGE_SHARED_SECRET` by `varnish/entrypoint.sh` at container start. The tests define their own `edge_config` with fixed values.
+The HMAC key enters the VCL through `config.vcl`, rendered from `SESSION_SECRET` by `varnish/entrypoint.sh` at container start. The tests define their own `edge_config` with a fixed value.
 
 ## Auth service (`auth/`)
 
-Express 5 with `openid-client` and `jose`. Four routes: `/auth/login`, `/auth/refresh` (same, with `prompt=none`), `/auth/callback`, `/auth/logout`. State, nonce and PKCE verifier travel in a signed, short-lived `example_auth` cookie, so the service is stateless. Discovery runs lazily and is retried while Keycloak is still starting. The session JWT is HS256 with `typ: example-session+jwt`; the `typ` is what lets the VCL reject the auth-state JWT even though both share the key.
+Express 5 with `openid-client` and `jose`, three files and about 260 lines. `index.js` reads the environment and holds the four routes: `/auth/login`, `/auth/refresh` (same, with `prompt=none`), `/auth/callback`, `/auth/logout`. `oidc.js` wraps `openid-client` (lazy discovery, retried while Keycloak is still starting). `session.js` mints the two JWTs: the session JWT (`typ: example-session+jwt`, only `role`, `iat`, `exp`) and the auth-state JWT that carries state, nonce and PKCE verifier through the redirect, so the service is stateless. The service never reads the session JWT back; verifying it is Varnish's job, and the differing `typ` is what lets the VCL reject an auth-state token presented as a session.
 
 ## WordPress side
 
-- `wordpress/mu-plugins/edge-guard.php`: 403 for anything without a valid `X-Edge-Secret` (`hash_equals`). WP-CLI and cron are exempt. Fails closed if the secret is missing.
-- `wordpress/plugins/example-role/example-role.php`: `example_role()`, `example_role_at_least()` and shortcodes. No DB access, no options, no user data.
+One plugin, `wordpress/plugins/example-role/example-role.php`: `example_role()`, `example_role_at_least()` and shortcodes. No DB access, no options, no user data. It trusts the `X-Example-Role` header, which is why WordPress must not be reachable except through Varnish.
 
 ```
 [example_role_content min="limited"]…[/example_role_content]        from this level upwards
@@ -178,6 +176,7 @@ The login link carries the current path as `return`. It is part of the page cach
 ## Open points for production
 
 - **Asymmetric signature.** HS256 means the HMAC key sits in the VCL of every Varnish node. With `vmod_crypto` (UPLEX, OpenSSL-based) Varnish could verify ES256/RS256 with the public key only, and the auth service would hold the private key. Same VCL shape, different vmod.
+- **Origin isolation.** WordPress must only accept connections from Varnish (firewall, private network, or mTLS). If that cannot be guaranteed, a shared-secret header set in `vcl_backend_fetch` and checked by a WordPress mu-plugin is a cheap second line of defence; an earlier revision of this prototype carried one.
 - **HTTPS everywhere**, `Secure` cookies, HSTS. `__Host-` prefix for the session cookie. TLS termination (Hitch or similar) in front of Varnish.
 - **Key rotation** for `SESSION_SECRET` (`kid` in the JWT header, two valid keys during rotation; a VCL `if` on the `kid`).
 - **Revocation latency.** A role change takes effect only after `exp` (up to 15 min). If that is too long: shorter TTL, or an opaque session id with a lookup at the edge instead of a JWT.
@@ -200,14 +199,12 @@ varnish/Dockerfile           varnish:7.7 + libvmod-digest
 varnish/entrypoint.sh        renders config.vcl from the environment, then starts varnishd
 varnish/default.vcl          backends + includes (Docker wiring)
 varnish/edge.vcl             the logic: role from JWT, hygiene, routing, hash, delivery
-varnish/config.vcl.template  sub edge_config with the two secrets
+varnish/config.vcl.template  sub edge_config with the HMAC key
 varnish/tests/edge.vtc       varnishtest with mocked WordPress and auth backends
-auth/src/config.js           env configuration
-auth/src/session.js          session JWT, auth-state JWT, cookie helpers, safeReturnPath
+auth/src/index.js            environment, cookie options, routes /auth/*
 auth/src/oidc.js             openid-client: discovery, PKCE, code exchange, id_token validation
-auth/src/index.js            routes /auth/*
+auth/src/session.js          session JWT, auth-state JWT, safeReturnPath, cookie parsing
 auth/test/                   node --test
-wordpress/mu-plugins/        edge-guard.php (origin protection)
 wordpress/plugins/           example-role (reads the header, shortcodes)
 wordpress/init.sh, content/  wp-cli setup and demo pages
 scripts/demo.sh              curl checks + flows

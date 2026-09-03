@@ -2,5 +2,4 @@
 # The tests under tests/ define their own edge_config with fixed test values.
 sub edge_config {
     var.set("session_key", "@@SESSION_SECRET@@");
-    var.set("edge_secret", "@@EDGE_SHARED_SECRET@@");
 }

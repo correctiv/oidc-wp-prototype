@@ -1,11 +1,14 @@
-// Session JWT and auth-state JWT.
+// Cookies and JWTs of the auth service.
 //
-// The session JWT is the only thing the browser receives for the site. It contains the role and
-// timestamps, nothing else: no user id, no email, no IdP token. Signed with HS256 using a secret
-// shared only between this service and Varnish (which verifies it in VCL); the IdP does not know it.
+// The session JWT is the only thing the browser receives for the site: role plus timestamps,
+// nothing else. It is signed with HS256 and a secret shared only with Varnish, which verifies it
+// in VCL. This service only mints it and never needs to read it back.
+//
+// The auth-state JWT carries state, nonce and PKCE verifier through the login redirect, so the
+// service stays stateless. Both JWTs use the same key but different `typ` values, which is what
+// lets Varnish reject an auth-state token presented as a session.
 
-import { SignJWT, jwtVerify, errors } from 'jose';
-import { config, normalizeRole } from './config.js';
+import { SignJWT, jwtVerify } from 'jose';
 
 export const SESSION_COOKIE = 'example_session';
 export const AUTH_COOKIE = 'example_auth';
@@ -13,96 +16,45 @@ export const AUTH_COOKIE = 'example_auth';
 const SESSION_TYP = 'example-session+jwt';
 const AUTHSTATE_TYP = 'example-authstate+jwt';
 
-const key = new TextEncoder().encode(config.session.secret);
+export function createSessions({ secret, ttlSeconds, authStateTtlSeconds = 300 }) {
+  const key = new TextEncoder().encode(secret);
 
-const nowSeconds = () => Math.floor(Date.now() / 1000);
+  const sign = (payload, typ, ttl) =>
+    new SignJWT(payload).setProtectedHeader({ alg: 'HS256', typ }).setIssuedAt().setExpirationTime(`${ttl}s`).sign(key);
 
-export async function mintSession(role) {
-  return new SignJWT({ role: normalizeRole(role) })
-    .setProtectedHeader({ alg: 'HS256', typ: SESSION_TYP })
-    .setIssuedAt()
-    .setExpirationTime(nowSeconds() + config.session.ttlSeconds)
-    .sign(key);
-}
+  return {
+    mintSession: (role) => sign({ role }, SESSION_TYP, ttlSeconds),
 
-/**
- * @returns {Promise<{state:'missing'}|{state:'invalid'}|{state:'expired'}|{state:'valid', role:string}>}
- */
-export async function verifySession(token) {
-  if (!token) return { state: 'missing' };
-  try {
-    const { payload } = await jwtVerify(token, key, { algorithms: ['HS256'], typ: SESSION_TYP });
-    return { state: 'valid', role: normalizeRole(payload.role) };
-  } catch (err) {
-    if (err instanceof errors.JWTExpired) return { state: 'expired' };
-    return { state: 'invalid' };
-  }
-}
+    /** @param {{state:string, nonce:string, codeVerifier:string, returnTo:string, silent:boolean}} data */
+    mintAuthState: (data) => sign(data, AUTHSTATE_TYP, authStateTtlSeconds),
 
-/**
- * Intermediate login state, signed into a cookie instead of kept in server memory.
- * @param {{state:string, nonce:string, codeVerifier:string, returnTo:string, silent:boolean}} data
- */
-export async function mintAuthState(data) {
-  return new SignJWT({
-    st: data.state,
-    nc: data.nonce,
-    cv: data.codeVerifier,
-    rt: data.returnTo,
-    si: data.silent ? 1 : 0,
-  })
-    .setProtectedHeader({ alg: 'HS256', typ: AUTHSTATE_TYP })
-    .setIssuedAt()
-    .setExpirationTime(nowSeconds() + config.session.authStateTtlSeconds)
-    .sign(key);
-}
-
-export async function verifyAuthState(token) {
-  if (!token) return null;
-  try {
-    const { payload } = await jwtVerify(token, key, { algorithms: ['HS256'], typ: AUTHSTATE_TYP });
-    return {
-      state: String(payload.st),
-      nonce: String(payload.nc),
-      codeVerifier: String(payload.cv),
-      returnTo: safeReturnPath(payload.rt),
-      silent: payload.si === 1,
-    };
-  } catch {
-    return null;
-  }
+    /** Returns the auth state or null if the token is missing, expired, tampered or of another typ. */
+    async verifyAuthState(token) {
+      if (!token) return null;
+      try {
+        const { payload } = await jwtVerify(token, key, { algorithms: ['HS256'], typ: AUTHSTATE_TYP });
+        return { ...payload, returnTo: safeReturnPath(payload.returnTo) };
+      } catch {
+        return null;
+      }
+    },
+  };
 }
 
 /** Only relative paths within the site; never external targets or /auth/*. */
 export function safeReturnPath(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length > 2000) return '/';
   if (value[0] !== '/' || value.startsWith('//') || value.startsWith('/\\')) return '/';
-  if (value.startsWith('/auth/') || value.startsWith('/_edge/')) return '/';
+  if (value.startsWith('/auth/')) return '/';
   return value;
-}
-
-/** Express cookie options. maxAge is in seconds here and converted to milliseconds. */
-export function cookieOptions(maxAgeSeconds) {
-  return {
-    path: '/',
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: config.secureCookies,
-    ...(maxAgeSeconds !== undefined ? { maxAge: maxAgeSeconds * 1000 } : {}),
-  };
 }
 
 /** Parses a Cookie header into a plain object. Later duplicates win. */
 export function parseCookies(cookieHeader) {
   const out = {};
-  if (!cookieHeader) return out;
-  for (const part of cookieHeader.split(';')) {
-    const trimmed = part.trim();
-    if (!trimmed) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq === -1) continue;
-    out[trimmed.slice(0, eq)] = trimmed.slice(eq + 1);
+  for (const part of (cookieHeader || '').split(';')) {
+    const eq = part.indexOf('=');
+    if (eq > 0) out[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
   }
   return out;
 }
-

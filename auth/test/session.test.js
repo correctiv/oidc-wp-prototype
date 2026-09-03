@@ -1,53 +1,41 @@
-import './_env.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mintAuthState, mintSession, parseCookies, safeReturnPath, verifyAuthState, verifySession } from '../src/session.js';
+import { decodeJwt, decodeProtectedHeader } from 'jose';
+import { createSessions, parseCookies, safeReturnPath } from '../src/session.js';
 
-test('session: mint and verify return the role', async () => {
-  const token = await mintSession('full');
-  assert.deepEqual(await verifySession(token), { state: 'valid', role: 'full' });
-});
+const sessions = createSessions({ secret: 'test-secret-test-secret-test-secret-1234', ttlSeconds: 900 });
+const authState = { state: 's1', nonce: 'n1', codeVerifier: 'cv1', returnTo: '/members/', silent: true };
 
-test('session: unknown role becomes none', async () => {
-  const token = await mintSession('admin');
-  assert.deepEqual(await verifySession(token), { state: 'valid', role: 'none' });
-});
-
-test('session: missing cookie is missing', async () => {
-  assert.deepEqual(await verifySession(undefined), { state: 'missing' });
-  assert.deepEqual(await verifySession(''), { state: 'missing' });
-});
-
-test('session: tampered token is invalid', async () => {
-  const token = await mintSession('limited');
-  const [h, p, s] = token.split('.');
-  const payload = JSON.parse(Buffer.from(p, 'base64url').toString());
-  payload.role = 'full';
-  const forged = [h, Buffer.from(JSON.stringify(payload)).toString('base64url'), s].join('.');
-  assert.deepEqual(await verifySession(forged), { state: 'invalid' });
-  assert.deepEqual(await verifySession('abc'), { state: 'invalid' });
-});
-
-test('session: expired token is expired', async () => {
-  const token = await mintSession('full');
-  await new Promise((r) => setTimeout(r, 1100));
-  assert.deepEqual(await verifySession(token), { state: 'expired' });
-});
-
-test('session: an auth-state token is not a valid session token', async () => {
-  const token = await mintAuthState({ state: 's', nonce: 'n', codeVerifier: 'cv', returnTo: '/x', silent: false });
-  assert.deepEqual(await verifySession(token), { state: 'invalid' });
+test('session JWT: carries only role, iat and exp, with the typ Varnish pins', async () => {
+  const token = await sessions.mintSession('full');
+  assert.deepEqual(decodeProtectedHeader(token), { alg: 'HS256', typ: 'example-session+jwt' });
+  const claims = decodeJwt(token);
+  assert.deepEqual(Object.keys(claims).sort(), ['exp', 'iat', 'role']);
+  assert.equal(claims.role, 'full');
+  assert.equal(claims.exp - claims.iat, 900);
 });
 
 test('auth state: round trip', async () => {
-  const token = await mintAuthState({ state: 's1', nonce: 'n1', codeVerifier: 'cv1', returnTo: '/members/', silent: true });
-  assert.deepEqual(await verifyAuthState(token), {
-    state: 's1',
-    nonce: 'n1',
-    codeVerifier: 'cv1',
-    returnTo: '/members/',
-    silent: true,
-  });
+  const token = await sessions.mintAuthState(authState);
+  const back = await sessions.verifyAuthState(token);
+  assert.deepEqual({ ...back, iat: undefined, exp: undefined }, { ...authState, iat: undefined, exp: undefined });
+});
+
+test('auth state: missing, tampered or wrong typ is rejected', async () => {
+  assert.equal(await sessions.verifyAuthState(undefined), null);
+  assert.equal(await sessions.verifyAuthState('abc'), null);
+  const token = await sessions.mintAuthState(authState);
+  const [h, p, s] = token.split('.');
+  const payload = decodeJwt(token);
+  payload.returnTo = 'https://evil.example';
+  const forged = [h, Buffer.from(JSON.stringify(payload)).toString('base64url'), s].join('.');
+  assert.equal(await sessions.verifyAuthState(forged), null);
+  assert.equal(await sessions.verifyAuthState(await sessions.mintSession('full')), null);
+});
+
+test('auth state: return path is sanitised on read', async () => {
+  const token = await sessions.mintAuthState({ ...authState, returnTo: '//evil.example' });
+  assert.equal((await sessions.verifyAuthState(token)).returnTo, '/');
 });
 
 test('safeReturnPath: only relative site paths', () => {

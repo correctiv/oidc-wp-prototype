@@ -1,8 +1,11 @@
 # Edge logic: derive the access level from the session JWT, enforce header hygiene, cache per role.
 #
 # The including file provides two backends (wordpress, auth) and `sub edge_config`, which sets
-# var "session_key" (HMAC key of the session JWT) and var "edge_secret" (shared secret towards
-# WordPress). In Docker that is default.vcl + the rendered config.vcl; in varnishtest the .vtc.
+# var "session_key" (HMAC key of the session JWT). In Docker that is default.vcl + the rendered
+# config.vcl; in varnishtest the .vtc.
+#
+# WordPress must only be reachable through this Varnish (network isolation); otherwise the
+# X-Example-Role header could be forged by talking to WordPress directly.
 
 import std;
 import cookie;
@@ -78,7 +81,6 @@ sub vcl_recv {
 
     # Nothing the client claims about its role or the edge is trusted.
     unset req.http.X-Example-Role;
-    unset req.http.X-Edge-Secret;
     unset req.http.X-Forwarded-Host;
     unset req.http.X-Forwarded-Proto;
     unset req.http.X-Session-State;
@@ -110,8 +112,6 @@ sub vcl_recv {
             unset req.http.Cookie;
         }
     }
-
-    set req.http.X-Edge-Secret = var.get("edge_secret");
 
     # Bypass rules
     if (req.method != "GET" && req.method != "HEAD") {

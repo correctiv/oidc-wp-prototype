@@ -7,7 +7,6 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 EDGE=${EDGE_URL:-http://www.localhost:8000}
-ORIGIN=${ORIGIN_URL:-http://localhost:8081}
 pass=0; fail=0
 
 check() { # label expected actual
@@ -32,20 +31,16 @@ check "   /wp-login.php bypasses the cache"           "BYPASS(path)" "$(header x
 check "8. Start page for none shows the login hint"   "1" "$(curl -s "$EDGE/" | grep -c 'You are not logged in')"
 check "   ... and no full-only content"               "0" "$(curl -s "$EDGE/" | grep -c 'Level full only')"
 
-echo; echo "━━━ Origin protection ━━━"
-check "9. Direct access to WordPress without the edge" "403"  "$(status "$ORIGIN/")"
-check "   ... even with a guessed secret"             "403"  "$(status -H 'X-Edge-Secret: guess' -H 'X-Example-Role: full' "$ORIGIN/")"
-
 echo; echo "━━━ OIDC flow ━━━"
 LOGIN_LOC=$(header location "$EDGE/auth/login?return=/members/")
-check "10. /auth/login redirects to the IdP"          "http://auth.localhost:8080/realms/example/protocol/openid-connect/auth?*" "$LOGIN_LOC"
+check "9. /auth/login redirects to the IdP"          "http://auth.localhost:8080/realms/example/protocol/openid-connect/auth?*" "$LOGIN_LOC"
 check "    ... with PKCE S256"                        "*code_challenge_method=S256*" "$LOGIN_LOC"
 check "    ... with scope=openid only"                "*scope=openid&*" "$LOGIN_LOC"
 check "    ... and no-store"                          "no-store" "$(header cache-control "$EDGE/auth/login")"
 check "    ... uncached via the auth backend"         "BYPASS(auth)" "$(header x-cache "$EDGE/auth/login")"
 # The return path is signed into the example_auth cookie; external targets must become "/".
-RT=$(header set-cookie "$EDGE/auth/login?return=https://evil.example" | sed 's/^example_auth=//; s/;.*//' | cut -d. -f2 | python3 -c "import base64,json,sys; t=sys.stdin.read().strip(); print(json.loads(base64.urlsafe_b64decode(t + '=' * (-len(t) % 4)))['rt'])")
-check "11. Open redirects are neutralised"            "/"    "$RT"
+RT=$(header set-cookie "$EDGE/auth/login?return=https://evil.example" | sed 's/^example_auth=//; s/;.*//' | cut -d. -f2 | python3 -c "import base64,json,sys; t=sys.stdin.read().strip(); print(json.loads(base64.urlsafe_b64decode(t + '=' * (-len(t) % 4)))['returnTo'])")
+check "10. Open redirects are neutralised"            "/"    "$RT"
 
 echo
 for u in anna ben carla; do node scripts/login-flow.mjs login "$u" || ((fail++)); done

@@ -23,8 +23,8 @@ function example_role_levels(): array {
 /**
  * Current access level from the request header. Unknown values become "none".
  *
- * The header comes exclusively from the edge. Direct access to the origin is
- * blocked by the mu-plugin edge-guard.php.
+ * The header comes exclusively from Varnish, which overwrites whatever the client sent.
+ * WordPress must therefore only be reachable through Varnish (network isolation).
  */
 function example_role(): string {
 	static $role = null;
