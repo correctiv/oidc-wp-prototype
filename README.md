@@ -1,27 +1,29 @@
 # Prototype: OIDC login with role-based edge caching for WordPress
 
-A proof of concept for this pattern: users log in at a separate OIDC identity provider, WordPress stores **no** user data and knows **no** identity. WordPress only learns an access level (`none`, `limited`, `full`) and renders different content accordingly. The site stays fully cacheable: Varnish caches per level, never per cookie or person.
+A proof of concept for this pattern: users log in at an OIDC identity provider through the community app, WordPress stores **no** user data and knows **no** identity. WordPress only learns an access level (`none`, `limited`, `full`) and renders different content accordingly. The site stays fully cacheable: Varnish caches per level, never per cookie or person.
 
 ```
-Browser ──► www.localhost:8000  Varnish ──────────────► wordpress:80 (Apache/PHP) ──► db (MariaDB)
-   │           │  every request: verify session JWT in VCL → X-Example-Role → cache per (role, URL)
-   │           └── /auth/* ────► auth:3000 (Express + openid-client, the OIDC relying party)
-   └──────────► auth.localhost:8080  Keycloak, realm "example"
-                  ▲ auth service back channel (token, JWKS) uses the same URL via extra_hosts
+Browser ──► www.example.localhost:8000 ───► HAProxy ──► Varnish ──► WordPress ──► MariaDB
+   │        community.example.localhost:8000 ──┘  │
+   │                                              └──► community app (Express + openid-client)
+   └──────► auth.example.localhost:8080  Keycloak, realm "example" (stands in for the IdP)
 ```
+
+Three hostnames, one parent domain. The community app is the OIDC relying party. After login it stores the IdP's `id_token` in a cookie scoped to `example.localhost`, so the website receives it too. HAProxy verifies that cookie on every request with the IdP's public key, sets `X-Example-Role` and removes the cookie. Varnish caches per role. WordPress reads the header.
 
 ## Core principles
 
-1. **WordPress is not an OIDC client.** A small auth service is the relying party (built on [openid-client](https://github.com/panva/openid-client)) and serves `/auth/*`. The `id_token` never leaves it.
-2. **The IdP token never goes into the cookie.** The auth service mints a minimal JWT with `role`, `iat`, `exp`. No `sub`, no email. CDN and Varnish logs therefore contain no PII either.
-3. **Varnish is the only thing in front of WordPress.** It verifies the JWT in VCL (HMAC-SHA256), sets `X-Example-Role`, strips the edge cookies towards the origin and drops `Set-Cookie` from cacheable responses. Whatever the client claims about its role is discarded.
-4. **WordPress is only reachable through Varnish.** In the compose stack it has no published port; in production a firewall or private network must guarantee the same. Otherwise `X-Example-Role` could be forged by talking to WordPress directly.
-5. **Role in the hash, not in `Vary`.** `vcl_hash` adds the role; static assets share one entry across roles.
-6. **Short role lifetime, silent refresh.** The role JWT lives 15 minutes. After that Varnish sends one `prompt=none` round trip via the auth service; if the IdP session is still alive the user notices nothing. Otherwise they fall back cleanly to `none`.
+1. **WordPress is not an OIDC client.** The community app is the relying party and serves `/auth/*`. WordPress never sees a token or a user.
+2. **The cookie is the IdP's own `id_token`, and it is lean.** Only the `openid` scope plus the role claim are requested, so the token carries an opaque `sub`, the role and standard timestamps. No email, no name.
+3. **The edge trusts the IdP, not the community app.** HAProxy verifies the RS256 signature with the IdP's public key on disk and checks `iss`, `aud` and `exp`. The community app is a courier; it cannot invent roles.
+4. **Header hygiene in HAProxy.** `X-Example-Role` from the client is discarded, the login cookie is stripped before Varnish, and the role header is set from the verified token only. Anything that fails verification is `none`.
+5. **Only HAProxy and Keycloak are reachable.** Varnish, the community app and WordPress live on the Docker network. In production a firewall or private network must guarantee the same, otherwise the header could be forged.
+6. **Role in the cache hash, not in `Vary`.** Varnish adds the role in `vcl_hash`; static assets share one entry across roles.
+7. **Silent refresh.** When the `id_token` has expired, HAProxy redirects HTML navigations once to the community app's `prompt=none` re-login. If the IdP session is still alive the user notices nothing; otherwise they fall back cleanly to `none`.
 
 ## Getting started
 
-Prerequisites: Docker with Compose v2, Node ≥ 22 (for the scripts only), Chrome or Firefox.
+Prerequisites: Docker with Compose v2, Node ≥ 22 (for the scripts only), OpenSSL (only to regenerate the demo key), Chrome or Firefox.
 
 ```bash
 cp .env.example .env      # optional, compose carries the same defaults
@@ -31,15 +33,16 @@ docker compose logs -f wp-init keycloak   # wait for "[wp-init] done" and "Keycl
 
 | Service | URL | Credentials |
 | --- | --- | --- |
-| Site (through Varnish) | http://www.localhost:8000 | |
-| Keycloak admin | http://auth.localhost:8080/admin/ | `admin` / `admin` |
-| WordPress admin (through Varnish) | http://www.localhost:8000/wp-admin/ | `admin` / `admin` |
+| Website (through HAProxy and Varnish) | http://www.example.localhost:8000 | |
+| Community app stand-in | http://community.example.localhost:8000 | |
+| Keycloak admin | http://auth.example.localhost:8080/admin/ | `admin` / `admin` |
+| WordPress admin (through the same chain) | http://www.example.localhost:8000/wp-admin/ | `admin` / `admin` |
 
-Chrome, Firefox and Linux with systemd-resolved resolve `*.localhost` to 127.0.0.1 on their own. If not: add `127.0.0.1 www.localhost auth.localhost` to `/etc/hosts`.
+Chrome, Firefox and Linux with systemd-resolved resolve `*.localhost` at any depth to 127.0.0.1 on their own. If your browser does not, add `127.0.0.1 www.example.localhost community.example.localhost auth.example.localhost` to `/etc/hosts`. Browsers accept a cookie with `Domain=example.localhost` because `example.localhost` is a registrable domain; a bare `Domain=localhost` would be rejected, which is why the hostnames have three labels.
 
 ### Demo users (password is `password` for all)
 
-| User | Attribute `example_role` in the IdP | Result on the site |
+| User | Attribute `example_role` in the IdP | Result on the website |
 | --- | --- | --- |
 | `anna` | `full` | sees everything |
 | `ben` | `limited` | sees public and limited content |
@@ -47,24 +50,24 @@ Chrome, Firefox and Linux with systemd-resolved resolve `*.localhost` to 127.0.0
 
 ### Demo in the browser
 
-1. Open http://www.localhost:8000. The badge shows `none`, the login hint is visible.
-2. "Log in now" → Keycloak login page on `auth.localhost` → log in as `anna` → back on the site with level `full`.
-3. DevTools → Application → Cookies: `www.localhost` only holds `example_session`. Decode the payload: only `role`, `iat`, `exp`.
-4. Network tab: response header `X-Cache: HIT` on reload, `X-Cache-Key: full|www.localhost:8000|/`.
-5. "Log out" → Keycloak confirmation → back with `none`.
-6. Log in as `ben`: different cache entry, different content. As `carla`: logged in, still `none`.
+1. Open http://www.example.localhost:8000. The badge shows `none`, the login hint is visible.
+2. "Log in now" → community app → Keycloak login page → log in as `anna` → back on the website with level `full`.
+3. DevTools → Application → Cookies: `example_session` with domain `example.localhost`. Decode the payload: `sub`, `example_role`, timestamps, nothing else.
+4. Network tab: `X-Cache: HIT` on reload, `X-Cache-Key: full|www.example.localhost:8000|/`. The request to the website carried the cookie; WordPress never saw it.
+5. Open http://community.example.localhost:8000: the same cookie is visible there, which is the point of the shared domain.
+6. "Log out" → Keycloak confirmation → back with `none`. Log in as `ben` and `carla` to see the other levels.
 
 ### Automated checks
 
 ```bash
-scripts/demo.sh                 # curl checks (cache, header hygiene, PKCE) + login/logout flows for all users
-scripts/demo.sh --with-refresh  # additionally silent refresh and the refresh failure case (auth service briefly runs with a 5s JWT)
-scripts/varnishtest.sh          # VCL tests (varnish/tests/edge.vtc) with mocked WordPress and auth backends
-node scripts/login-flow.mjs login anna   # a single flow, shows every redirect hop
-cd auth && npm test                      # unit tests for the session JWT
+scripts/demo.sh                 # curl checks (cache, header hygiene, forged tokens, PKCE) + login/logout flows for all users
+scripts/demo.sh --with-refresh  # additionally silent refresh and the refresh failure case (sets the id_token lifetime to 5s in Keycloak for a moment)
+scripts/varnishtest.sh          # VCL tests (varnish/tests/edge.vtc) with a mocked WordPress backend
+node scripts/login-flow.mjs login anna   # a single flow, shows every redirect hop and which cookies go where
+cd auth && npm test                      # unit tests for the auth-state cookie and return-URL handling
 ```
 
-Useful while watching: `docker compose exec varnish varnishlog -q 'ReqURL ~ "^/"' -i ReqURL,ReqHeader,RespHeader` and `docker compose exec varnish varnishstat -1 -f MAIN.cache_hit -f MAIN.cache_miss`. Clear the cache with `docker compose exec varnish varnishadm ban 'req.url ~ .'`.
+Useful while watching: `docker compose logs -f haproxy` for the access log, `docker compose exec varnish varnishlog -q 'ReqURL ~ "^/"' -i ReqURL,ReqHeader,RespHeader` to see what reaches Varnish (no login cookie should), and `docker compose exec varnish varnishadm ban 'req.url ~ .'` to clear the cache.
 
 ## Flows
 
@@ -73,22 +76,20 @@ Useful while watching: `docker compose exec varnish varnishlog -q 'ReqURL ~ "^/"
 ```mermaid
 sequenceDiagram
     participant B as Browser
-    participant V as Varnish
-    participant A as Auth service
+    participant H as HAProxy
+    participant C as Community app
     participant K as Keycloak
-    participant W as WordPress
-    B->>V: GET /auth/login?return=/members/
-    V->>A: pass (uncached, cookies untouched)
-    A->>B: 302 → Keycloak /auth (PKCE, state, nonce)<br/>Set-Cookie example_auth (state, nonce, verifier, 5 min)
-    B->>K: GET /auth … login form
-    B->>K: POST credentials
-    K->>B: 302 → /auth/callback?code&state
-    B->>V: GET /auth/callback (cookie example_auth)
-    V->>A: pass
-    A->>K: POST /token (code, verifier, client_secret) [back channel]
-    K->>A: id_token (only sub + example_role)
-    A->>A: validate (openid-client), read the role, discard the rest
-    A->>B: 302 → /members/<br/>Set-Cookie example_session = JWT{role, exp}
+    participant W as Varnish + WordPress
+    B->>H: GET community…/auth/login?return=http://www…/members/
+    H->>C: route by hostname
+    C->>B: 302 → Keycloak /auth (PKCE, state, nonce)<br/>Set-Cookie example_auth (host-only, 5 min)
+    B->>K: login form, POST credentials
+    K->>B: 302 → community…/auth/callback?code&state
+    B->>H: GET /auth/callback
+    H->>C: route by hostname
+    C->>K: POST /token (code, verifier, client_secret) [back channel]
+    K->>C: id_token (sub, example_role, timestamps)
+    C->>B: 302 → http://www…/members/<br/>Set-Cookie example_session = id_token; Domain=example.localhost
     Note over B,W: WordPress was not involved in any step.
 ```
 
@@ -97,63 +98,67 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant B as Browser
+    participant H as HAProxy
     participant V as Varnish
     participant W as WordPress
-    B->>V: GET /members/ (cookie example_session)
-    V->>V: vcl_recv: verify HMAC + exp in VCL → role=full<br/>vcl_hash: url + host + role
+    B->>H: GET www…/members/ (cookie example_session)
+    H->>H: jwt_verify with idp-public.pem, check iss/aud/exp,<br/>role := example_role claim, strip the cookie
+    H->>V: GET /members/, X-Example-Role: full
+    V->>V: vcl_hash: url + host + role
     alt cache HIT
         V->>B: 200 from cache, X-Cache: HIT
     else MISS
-        V->>W: GET /members/<br/>X-Example-Role: full, without example_session
+        V->>W: GET /members/, X-Example-Role: full
         W->>V: 200, Cache-Control: public, s-maxage=60
         V->>V: drop Set-Cookie, store
         V->>B: 200, X-Cache: MISS
     end
 ```
 
-### Silent refresh after the role JWT expired
+### Silent refresh after the id_token expired
 
 ```mermaid
 sequenceDiagram
     participant B as Browser
-    participant V as Varnish
-    participant A as Auth service
+    participant H as HAProxy
+    participant C as Community app
     participant K as Keycloak
-    B->>V: GET / (Accept: text/html, JWT expired)
-    V->>B: 302 → /auth/refresh?return=/ (synthesised in VCL)
-    B->>V: GET /auth/refresh
-    V->>A: pass
-    A->>B: 302 → Keycloak /auth … prompt=none
+    B->>H: GET www…/ (Accept: text/html, token signature ok but exp passed)
+    H->>B: 302 → community…/auth/refresh?return=http://www…/
+    B->>C: GET /auth/refresh (via HAProxy)
+    C->>B: 302 → Keycloak /auth … prompt=none
     alt IdP session alive
         K->>B: 302 → /auth/callback?code
-        A->>B: new JWT, 302 → /
+        C->>B: fresh id_token in the cookie, 302 → http://www…/
     else IdP session expired
         K->>B: 302 → /auth/callback?error=login_required
-        A->>B: delete cookie, 302 → / (role none, no further redirect)
+        C->>B: delete the cookie, 302 → http://www…/ (role none, no further redirect)
     end
 ```
 
-## What the VCL does (`varnish/edge.vcl`)
+## What each piece does
+
+### HAProxy (`haproxy/haproxy.cfg`)
 
 | Step | Behaviour |
 | --- | --- |
-| Role | `edge_role_from_cookie`: split the JWT, pin `alg`/`typ`, compare `digest.hmac_sha256` with the base64url-decoded signature (via `vmod_blob`), check `exp`, whitelist the role. Missing, invalid, tampered → `none`. Expired + HTML navigation → `synth(752)` → 302 to `/auth/refresh`. |
-| Request hygiene | Discard `X-Example-Role` and `X-Forwarded-*` from the client. `cookie.filter` removes `example_session`/`example_auth`. Then set `X-Example-Role` from the verified JWT. Internal working headers are unset in `vcl_backend_fetch`. |
-| Routing | `/auth/*` → backend `auth`, always `pass`, cookies untouched. Everything else → backend `wordpress`. |
-| Bypass | Anything but GET/HEAD, `/wp-admin`, `/wp-login.php`, `/wp-cron.php`, `/xmlrpc.php`, or a `wordpress_logged_in_*` cookie (WP editors). Other cookies do not prevent caching. |
-| Hash | `url` + `Host` + role; under `/wp-content/` and `/wp-includes/` without the role. |
-| Store | `vcl_backend_response` drops `Set-Cookie` on cacheable fetches (logged via `std.log`) and turns non-200 into a short hit-for-miss. TTL from `s-maxage`/`max-age`, else `default_ttl` (60 s). The built-in VCL still handles `private`/`no-store`. |
-| Debug headers | `X-Cache: HIT\|MISS\|UNCACHEABLE\|BYPASS(reason)\|REFRESH`, `X-Example-Role`, `X-Cache-Key`, plus Varnish's own `Age` and `Via`. |
+| Routing | `community.example.localhost` → backend `community`; everything else → backend `website` (Varnish). |
+| Token check | `req.cook(example_session)` → `jwt_header_query` pins `RS256`, `jwt_verify` with `idp-public.pem`, `jwt_payload_query` checks `iss` and `aud` and reads `exp` and `example_role`. Missing, tampered, wrong issuer or audience → `none`. |
+| Expiry | `exp` compared with `date()`. Expired but otherwise valid token on a `GET` with `Accept: text/html` → 302 to the community app's `/auth/refresh` with the current URL as `return`. |
+| Hygiene | `X-Example-Role` from the client is deleted; the login cookie is removed from the `Cookie` header (other cookies pass); the header is set from the verified role only. |
+| Key material | The IdP's public key as a PEM file. Zitadel and Keycloak rotate signing keys, so production needs a small job that fetches the JWKS, writes the PEM and reloads HAProxy. `scripts/generate-idp-key.sh` produces the demo pair. |
 
-The HMAC key enters the VCL through `config.vcl`, rendered from `SESSION_SECRET` by `varnish/entrypoint.sh` at container start. The tests define their own `edge_config` with a fixed value.
+### Varnish (`varnish/edge.vcl`)
 
-## Auth service (`auth/`)
+Trusts `X-Example-Role` because only HAProxy can reach it; normalises anything but `limited`/`full` to `none`. Hashes on URL, host and role; assets under `/wp-content/` and `/wp-includes/` without the role. Bypasses the cache for non-GET, `/wp-admin`, `/wp-login.php` and requests with a WordPress login cookie. Drops `Set-Cookie` from cacheable responses and turns non-200 into a short hit-for-miss. Debug headers: `X-Cache`, `X-Cache-Key`, `X-Example-Role`. Plain `varnish:7.7` image, no extra vmods.
 
-Express 5 with `openid-client` and `jose`, three files and about 260 lines. `index.js` reads the environment and holds the four routes: `/auth/login`, `/auth/refresh` (same, with `prompt=none`), `/auth/callback`, `/auth/logout`. `oidc.js` wraps `openid-client` (lazy discovery, retried while Keycloak is still starting). `session.js` mints the two JWTs: the session JWT (`typ: example-session+jwt`, only `role`, `iat`, `exp`) and the auth-state JWT that carries state, nonce and PKCE verifier through the redirect, so the service is stateless. The service never reads the session JWT back; verifying it is Varnish's job, and the differing `typ` is what lets the VCL reject an auth-state token presented as a session.
+### Community app stand-in (`auth/`)
 
-## WordPress side
+Express 5 with `openid-client` and `jose`, three files. `index.js` reads the environment and holds a tiny status page plus the four routes `/auth/login`, `/auth/refresh` (same, with `prompt=none`), `/auth/callback`, `/auth/logout`. `oidc.js` wraps `openid-client` (lazy discovery, retried while Keycloak is still starting). `state.js` signs the short-lived, host-only `example_auth` cookie that carries state, nonce, PKCE verifier and the return URL through the redirect, and validates return URLs against an allowlist of hosts. The real community app would replace all of this with its existing login, keeping only two obligations: set the `id_token` cookie with `Domain=example.localhost`, and accept a `return` parameter on login and logout.
 
-One plugin, `wordpress/plugins/example-role/example-role.php`: `example_role()`, `example_role_at_least()` and shortcodes. No DB access, no options, no user data. It trusts the `X-Example-Role` header, which is why WordPress must not be reachable except through Varnish.
+### WordPress (`wordpress/plugins/example-role/`)
+
+`example_role()`, `example_role_at_least()` and shortcodes. No DB access, no options, no user data.
 
 ```
 [example_role_content min="limited"]…[/example_role_content]        from this level upwards
@@ -161,53 +166,54 @@ One plugin, `wordpress/plugins/example-role/example-role.php`: `example_role()`,
 [example_role_badge label="…"]   [example_login_link text="…"]   [example_logout_link text="…"]
 ```
 
-The login link carries the current path as `return`. It is part of the page cached per role, so it is not personal data.
+The login and logout links point at the community app with the current page as `return`. They are part of the page cached per role, so they are not personal data.
+
+### Keycloak (`keycloak/realm-example.json`)
+
+Realm `example` with a fixed RSA signing key (so HAProxy can hold the matching public key), client `community-app` (confidential, PKCE S256, `basic` scope only, redirect URI on the community host, post-logout URIs on both hosts), a mapper that puts the user attribute `example_role` into the `id_token`, and the three demo users. `accessTokenLifespan` (900 s) is also the `id_token` lifetime and therefore the website's session length.
 
 ## Pitfalls of the local environment
 
-- **`vmod_digest` has to be compiled into the image.** The official `varnish:7.7` image ships `cookie`, `var`, `blob`, `std` and the `install-vmod` helper; `varnish/Dockerfile` builds `libvmod-digest` against the `varnish-dev` package found in `/pkgs`. Its `base64url_*_hex` helpers are unreliable in 1.0.3, so the signature is transcoded with the built-in `vmod_blob` instead.
 - **Keycloak sets `Secure` cookies on `*.localhost`**, because like browsers it treats `*.localhost` as a secure context. Chrome and Firefox accept that over http, `curl` does not. That is why `scripts/login-flow.mjs` plays the browser for the automated flows.
-- **One hostname for Keycloak, also inside Docker.** `openid-client` checks during discovery that the issuer matches the URL it was fetched from, so the auth container must reach Keycloak under the browser's URL. `extra_hosts: auth.localhost:host-gateway` maps that name to the Docker host, where Keycloak's port 8080 is published.
-- **Keycloak without persistence.** The realm is imported fresh on every start (dev mode). Changes made in the admin UI are lost on restart; permanent changes belong in `keycloak/realm-example.json`.
-- **Logout shows a confirmation page**, because the auth service does not send an `id_token_hint`. It deliberately does not store the `id_token`.
-- The session cookie lives longer (12 h) than the JWT (15 min). Only then can an expired JWT trigger the silent refresh.
-- Varnish logs a harmless `mlock() of VSM failed` warning in Docker; raising the `memlock` ulimit silences it.
+- **The domain cookie also reaches Keycloak.** `auth.example.localhost` is under `example.localhost`, so every request to Keycloak carries the `id_token` cookie. Keycloak ignores it, but it illustrates the production question: which other subdomains would receive this cookie?
+- **One hostname for Keycloak, also inside Docker.** `openid-client` checks during discovery that the issuer matches the URL it was fetched from, so the community app container must reach Keycloak under the browser's URL. `extra_hosts: auth.example.localhost:host-gateway` maps that name to the Docker host.
+- **Keycloak without persistence.** The realm is imported fresh on every start. Changes made in the admin UI are lost on restart; permanent changes belong in `keycloak/realm-example.json`. The demo signing key is committed on purpose; it signs nothing but demo logins.
+- **Logout shows a confirmation page**, because the community app does not send an `id_token_hint`.
+- The login cookie lives longer (12 h) than the `id_token` (15 min). Only then can an expired token trigger the silent refresh.
 
 ## Open points for production
 
-- **Asymmetric signature.** HS256 means the HMAC key sits in the VCL of every Varnish node. With `vmod_crypto` (UPLEX, OpenSSL-based) Varnish could verify ES256/RS256 with the public key only, and the auth service would hold the private key. Same VCL shape, different vmod.
-- **Origin isolation.** WordPress must only accept connections from Varnish (firewall, private network, or mTLS). If that cannot be guaranteed, a shared-secret header set in `vcl_backend_fetch` and checked by a WordPress mu-plugin is a cheap second line of defence; an earlier revision of this prototype carried one.
-- **HTTPS everywhere**, `Secure` cookies, HSTS. `__Host-` prefix for the session cookie. TLS termination (Hitch or similar) in front of Varnish.
-- **Key rotation** for `SESSION_SECRET` (`kid` in the JWT header, two valid keys during rotation; a VCL `if` on the `kid`).
-- **Revocation latency.** A role change takes effect only after `exp` (up to 15 min). If that is too long: shorter TTL, or an opaque session id with a lookup at the edge instead of a JWT.
-- **Rate limiting** on `/auth/*` (`vmod_vsthrottle` ships with the image), especially `/auth/callback`.
-- **Role source in the IdP.** A user attribute in the prototype. For real: a group, a subscription status, or a mapper onto an external system. The claim `example_role` stays the interface.
-- **More roles = more cache variants.** Three levels are harmless. Do not put fine-grained claims into the hash.
-- **Feeds, REST API, search** need the same treatment as pages (happens automatically through the hash, but check deliberately). Consider `pass` for `?s=` searches.
-- **Purging** when content changes: the WordPress side needs a purge/ban hook towards Varnish, e.g. `vmod_xkey` (ships with the image) with a post-id tag on every page.
+- **Zitadel instead of Keycloak.** Same flow. Zitadel's roles claim is a nested object under `urn:zitadel:iam:org:project:roles`, which HAProxy's JSON path handling will not read comfortably; a Zitadel Action that adds a flat `example_role` claim keeps the HAProxy rule a one-liner. Request only `openid` plus the roles scope.
+- **Key rotation.** HAProxy needs the IdP's public key as a file. A small job fetching the JWKS, converting to PEM and reloading HAProxy, with the old key kept during the grace period.
+- **Subdomain inventory.** The domain cookie is sent to every subdomain of the parent domain, including anything CNAMEd to a third party. Keep the token lean and know the list.
+- **Cookie attributes.** `Secure`, `HttpOnly`, `SameSite=Lax` (or `Strict`, everything is one site), `__Secure-` prefix. `__Host-` is impossible with a `Domain`. Deleting on logout must use the same `Domain`.
+- **Session length and revocation.** A role change takes effect when the `id_token` expires or the user visits the community app again. Pick the lifetime accordingly, or have the community app refresh the cookie from its own refresh token.
+- **Community app availability.** Website login depends on it. Cached pages keep serving the anonymous variant if it is down.
+- **Rate limiting** on `/auth/*`, e.g. `stick-table` and `http-request track-sc0` in HAProxy.
+- **Purging** when content changes: a purge or ban hook from WordPress towards Varnish, e.g. `vmod_xkey` with a post-id tag.
+- **Feeds, REST API, search** need the same treatment as pages; consider `pass` for `?s=` searches.
 - **Block editor integration** instead of shortcodes: a "level … and up" container block with the same server-side logic.
-- **Personalisation**, if ever wanted, only client-side via JS against the userinfo endpoint. The cached page stays anonymous.
-- **Monitoring.** Hit rate per role (log `X-Example-Role`), number of `REFRESH` responses, IdP error rates in the auth service.
+- **Monitoring.** Hit rate per role (log `X-Example-Role`), number of refresh redirects, IdP error rates in the community app.
 
 ## File layout
 
 ```
-docker-compose.yml           stack: db, wordpress, wp-init, keycloak, auth, varnish
+docker-compose.yml           stack: db, wordpress, wp-init, keycloak, auth, varnish, haproxy
 .env.example                 secrets and TTLs (defaults also in compose)
-keycloak/realm-example.json  realm, client example-web (PKCE, scope basic only), mapper, demo users
-varnish/Dockerfile           varnish:7.7 + libvmod-digest
-varnish/entrypoint.sh        renders config.vcl from the environment, then starts varnishd
-varnish/default.vcl          backends + includes (Docker wiring)
-varnish/edge.vcl             the logic: role from JWT, hygiene, routing, hash, delivery
-varnish/config.vcl.template  sub edge_config with the HMAC key
-varnish/tests/edge.vtc       varnishtest with mocked WordPress and auth backends
-auth/src/index.js            environment, cookie options, routes /auth/*
+haproxy/haproxy.cfg          routing, id_token verification, X-Example-Role, cookie stripping, refresh redirect
+haproxy/idp-public.pem       the IdP's public key (demo pair, see scripts/generate-idp-key.sh)
+keycloak/realm-example.json  realm with fixed signing key, client community-app, role mapper, demo users
+varnish/default.vcl          backend wiring
+varnish/edge.vcl             cache per role, bypass rules, response hygiene
+varnish/tests/edge.vtc       varnishtest with a mocked WordPress backend
+auth/src/index.js            environment, status page, routes /auth/*
 auth/src/oidc.js             openid-client: discovery, PKCE, code exchange, id_token validation
-auth/src/session.js          session JWT, auth-state JWT, safeReturnPath, cookie parsing
+auth/src/state.js            auth-state cookie, return-URL allowlist, cookie parsing
 auth/test/                   node --test
 wordpress/plugins/           example-role (reads the header, shortcodes)
 wordpress/init.sh, content/  wp-cli setup and demo pages
 scripts/demo.sh              curl checks + flows
 scripts/varnishtest.sh       runs the VCL tests inside the Varnish image
 scripts/login-flow.mjs       browser simulation: login, logout, refresh, refresh-fail
+scripts/generate-idp-key.sh  regenerates the demo signing key pair
 ```

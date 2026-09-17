@@ -1,8 +1,8 @@
 {
-  "name": "example-auth",
+  "name": "example-community-app",
   "version": "0.1.0",
   "private": true,
-  "description": "Auth service: OIDC relying party that mints the role cookie; Varnish does the caching",
+  "description": "Community app stand-in: OIDC relying party that sets the domain-wide login cookie",
   "type": "module",
   "engines": { "node": ">=22" },
   "scripts": {

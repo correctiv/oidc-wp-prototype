@@ -1,22 +1,23 @@
 #!/usr/bin/env node
-// Plays the browser: login at the IdP through the edge, logout, silent refresh.
-// No dependencies, Node >= 22 only.
+// Plays the browser: login via the community app, logout, silent refresh, and what the website
+// makes of the resulting cookie. No dependencies, Node >= 22 only.
 //
-//   node scripts/login-flow.mjs login anna                 # expects role full
+//   node scripts/login-flow.mjs login anna                 # expects role full on the website
 //   node scripts/login-flow.mjs login ben                  # expects role limited
 //   node scripts/login-flow.mjs login carla                # expects role none (logged in, but no level)
-//   node scripts/login-flow.mjs logout anna                # login, then logout via the edge -> none
-//   node scripts/login-flow.mjs refresh anna --wait 7      # login, let the JWT expire -> silent re-login keeps the role
-//   node scripts/login-flow.mjs refresh-fail anna --wait 7 # login, end the IdP session, let the JWT expire -> none
+//   node scripts/login-flow.mjs logout anna                # login, then logout via the community app -> none
+//   node scripts/login-flow.mjs refresh anna --wait 7      # login, let the id_token expire -> silent re-login keeps the role
+//   node scripts/login-flow.mjs refresh-fail anna --wait 7 # login, end the IdP session, let the token expire -> none
 //
-// The refresh scenarios need a short JWT lifetime, e.g.:
-//   SESSION_TTL_SECONDS=5 docker compose up -d auth
+// The refresh scenarios need a short id_token lifetime (accessTokenLifespan in the realm);
+// scripts/demo.sh --with-refresh sets it temporarily through the Keycloak admin API.
 //
 // Note: Keycloak sets Secure cookies on *.localhost (browsers treat *.localhost as a secure
 // context). curl drops such cookies over http, which is why this script exists instead of curl.
 
-const EDGE = process.env.EDGE_URL || 'http://www.localhost:8000';
-const IDP = process.env.IDP_URL || 'http://auth.localhost:8080/realms/example';
+const SITE = process.env.SITE_URL || 'http://www.example.localhost:8000';
+const COMMUNITY = process.env.COMMUNITY_URL || 'http://community.example.localhost:8000';
+const IDP = process.env.IDP_URL || 'http://auth.example.localhost:8080/realms/example';
 const EXPECTED = { anna: 'full', ben: 'limited', carla: 'none' };
 // Text markers from the demo content, used to show which sections are visible.
 const SECTIONS = ['You are not logged in', 'From level limited', 'You have limited access', 'Level full only'];
@@ -31,11 +32,16 @@ if (!scenario || !user) {
   process.exit(2);
 }
 
-// --- Minimal per-host cookie jar. Path and Secure are ignored on purpose. ---
+// --- Minimal cookie jar with Domain support. Path and Secure are ignored on purpose. ---
+// key: domain -> Map(name -> {value, hostOnly})
 const jar = new Map();
+const domainMatches = (host, domain, hostOnly) => (hostOnly ? host === domain : host === domain || host.endsWith(`.${domain}`));
 function cookieHeader(url) {
-  const c = jar.get(url.host);
-  return c && c.size ? [...c].map(([k, v]) => `${k}=${v}`).join('; ') : undefined;
+  const pairs = [];
+  for (const [domain, cookies] of jar) {
+    for (const [name, c] of cookies) if (domainMatches(url.hostname, domain, c.hostOnly)) pairs.push(`${name}=${c.value}`);
+  }
+  return pairs.length ? pairs.join('; ') : undefined;
 }
 function storeCookies(url, res) {
   for (const sc of res.headers.getSetCookie()) {
@@ -43,15 +49,22 @@ function storeCookies(url, res) {
     const eq = pair.indexOf('=');
     const name = pair.slice(0, eq).trim();
     const value = pair.slice(eq + 1).trim();
-    const lower = attrs.map((a) => a.trim().toLowerCase());
-    const maxAge = lower.find((a) => a.startsWith('max-age='));
-    const expires = lower.find((a) => a.startsWith('expires='));
-    const expired = (maxAge && Number(maxAge.slice(8)) <= 0) || (expires && new Date(expires.slice(8)).getTime() <= Date.now());
-    if (!jar.has(url.host)) jar.set(url.host, new Map());
-    if (value === '' || expired) jar.get(url.host).delete(name);
-    else jar.get(url.host).set(name, value);
+    const lower = attrs.map((a) => a.trim());
+    const domainAttr = lower.find((a) => a.toLowerCase().startsWith('domain='))?.slice(7).replace(/^\./, '').toLowerCase();
+    const maxAge = lower.find((a) => a.toLowerCase().startsWith('max-age='))?.slice(8);
+    const expires = lower.find((a) => a.toLowerCase().startsWith('expires='))?.slice(8);
+    const expired = (maxAge !== undefined && Number(maxAge) <= 0) || (expires && new Date(expires).getTime() <= Date.now());
+    const domain = domainAttr || url.hostname;
+    if (!jar.has(domain)) jar.set(domain, new Map());
+    if (value === '' || expired) jar.get(domain).delete(name);
+    else jar.get(domain).set(name, { value, hostOnly: !domainAttr });
   }
 }
+const cookieNames = (host) => {
+  const names = [];
+  for (const [domain, cookies] of jar) for (const [name, c] of cookies) if (domainMatches(host, domain, c.hostOnly)) names.push(`${name}${c.hostOnly ? '' : ` (Domain=${domain})`}`);
+  return names.join(', ') || '(none)';
+};
 
 async function request(url, { method = 'GET', body, headers = {} } = {}) {
   url = new URL(url);
@@ -83,14 +96,12 @@ function short(u) {
   return `${url.host}${url.pathname}${url.search ? '?' + url.searchParams.keys().next().value + '=…' : ''}`;
 }
 const step = (msg) => console.log(msg);
-const attr = (html, tag, name) => html.match(new RegExp(`<form[^>]*${tag}="${name}"[^>]*>`))?.[0];
 const decode = (s) => s.replace(/&amp;/g, '&');
 
 function formAction(html, formSelector, pageUrl) {
-  const form = attr(html, 'id', formSelector) || html.match(new RegExp(`<form[^>]*action="[^"]*${formSelector}[^"]*"[^>]*>`))?.[0];
+  const form = html.match(new RegExp(`<form[^>]*id="${formSelector}"[^>]*>`))?.[0] || html.match(new RegExp(`<form[^>]*action="[^"]*${formSelector}[^"]*"[^>]*>`))?.[0];
   if (!form) throw new Error(`form ${formSelector} not found`);
-  const action = decode(form.match(/action="([^"]+)"/)[1]);
-  return new URL(action, pageUrl);
+  return new URL(decode(form.match(/action="([^"]+)"/)[1]), pageUrl);
 }
 function hiddenInputs(html) {
   const out = new URLSearchParams();
@@ -103,56 +114,55 @@ function hiddenInputs(html) {
 }
 
 async function currentRole(path = '/') {
-  const res = await request(`${EDGE}${path}`);
+  const res = await request(`${SITE}${path}`);
   if (res.status !== 200) throw new Error(`GET ${path}: HTTP ${res.status}`);
   const html = await res.text();
   const visible = SECTIONS.filter((s) => html.includes(s));
   step(`  ☐ visible sections on ${path}: ${visible.join(' | ') || '(none)'}  [${res.headers.get('x-cache')}]`);
-  return { role: res.headers.get('x-example-role'), cache: res.headers.get('x-cache'), key: res.headers.get('x-cache-key') };
+  return { role: res.headers.get('x-example-role'), cache: res.headers.get('x-cache') };
 }
 
 async function login() {
-  step(`\n▶ Login as ${user} via ${EDGE}/auth/login`);
-  const page = await follow(`${EDGE}/auth/login?return=/members/`);
+  const returnTo = `${SITE}/members/`;
+  step(`\n▶ Login as ${user} via ${COMMUNITY}/auth/login, returning to ${returnTo}`);
+  const page = await follow(`${COMMUNITY}/auth/login?return=${encodeURIComponent(returnTo)}`);
   if (!page.html.includes('kc-form-login')) throw new Error('Keycloak login page not reached');
-  const action = formAction(page.html, 'kc-form-login', page.url);
   const body = hiddenInputs(page.html);
   body.set('username', user);
   body.set('password', password);
+  const action = formAction(page.html, 'kc-form-login', page.url);
   step(`  ✎ submitting the form to ${short(action)}`);
   const done = await follow(action, { method: 'POST', body, headers: { 'content-type': 'application/x-www-form-urlencoded' } });
-  if (done.url.host !== new URL(EDGE).host || done.url.pathname !== '/members/') {
-    throw new Error(`login did not end on /members/ but on ${done.url} (HTTP ${done.res.status})`);
-  }
+  if (done.url.toString() !== returnTo) throw new Error(`login did not end on ${returnTo} but on ${done.url} (HTTP ${done.res.status})`);
   step(`  ✓ back on ${short(done.url)} with role ${done.res.headers.get('x-example-role')}`);
-  const sessionCookie = jar.get(new URL(EDGE).host)?.get('example_session');
-  if (!sessionCookie) throw new Error('no example_session cookie set');
-  const claims = JSON.parse(Buffer.from(sessionCookie.split('.')[1], 'base64url').toString());
-  step(`  ✓ session JWT claims: ${JSON.stringify(claims)}  (no sub, no email)`);
-  step(`  ✓ cookies for ${new URL(EDGE).host}: ${[...jar.get(new URL(EDGE).host).keys()].join(', ')}`);
-  step(`  ✓ cookies for ${new URL(IDP).host}: ${[...(jar.get(new URL(IDP).host)?.keys() ?? [])].join(', ')}`);
+  const siteHost = new URL(SITE).hostname;
+  const token = [...jar].flatMap(([d, c]) => [...c].filter(([n, v]) => n === 'example_session' && domainMatches(siteHost, d, v.hostOnly)).map(([, v]) => v.value))[0];
+  if (!token) throw new Error('no example_session cookie visible to the website');
+  const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString());
+  step(`  ✓ id_token in the cookie carries: ${Object.keys(claims).join(', ')}  (role=${claims.example_role ?? 'none'})`);
+  step(`  ✓ cookies sent to ${siteHost}: ${cookieNames(siteHost)}`);
+  step(`  ✓ cookies sent to ${new URL(COMMUNITY).hostname}: ${cookieNames(new URL(COMMUNITY).hostname)}`);
+  step(`  ✓ cookies sent to ${new URL(IDP).hostname}: ${cookieNames(new URL(IDP).hostname)}`);
   return currentRole();
 }
 
-async function edgeLogout() {
-  step(`\n▶ Logout via ${EDGE}/auth/logout`);
-  const page = await follow(`${EDGE}/auth/logout`);
-  await confirmIdpLogout(page);
+async function communityLogout() {
+  step(`\n▶ Logout via ${COMMUNITY}/auth/logout`);
+  await confirmIdpLogout(await follow(`${COMMUNITY}/auth/logout?return=${encodeURIComponent(`${SITE}/`)}`));
 }
 
 async function idpLogoutDirect() {
-  step(`\n▶ Ending the IdP session directly at the IdP (edge cookie stays in place)`);
+  step(`\n▶ Ending the IdP session directly at the IdP (login cookie stays in place)`);
   const url = new URL(`${IDP}/protocol/openid-connect/logout`);
-  url.searchParams.set('client_id', 'example-web');
-  url.searchParams.set('post_logout_redirect_uri', `${EDGE}/`);
+  url.searchParams.set('client_id', 'community-app');
+  url.searchParams.set('post_logout_redirect_uri', `${SITE}/`);
   await confirmIdpLogout(await follow(url));
 }
 
 async function confirmIdpLogout(page) {
   if (page.html.includes('logout-confirm')) {
-    const action = formAction(page.html, 'logout-confirm', page.url);
     step(`  ✎ confirming the logout at the IdP`);
-    const done = await follow(action, { method: 'POST', body: hiddenInputs(page.html), headers: { 'content-type': 'application/x-www-form-urlencoded' } });
+    const done = await follow(formAction(page.html, 'logout-confirm', page.url), { method: 'POST', body: hiddenInputs(page.html), headers: { 'content-type': 'application/x-www-form-urlencoded' } });
     step(`  ✓ landed on ${short(done.url)}`);
   } else {
     step(`  ✓ landed on ${short(page.url)} (no confirmation needed)`);
@@ -160,14 +170,15 @@ async function confirmIdpLogout(page) {
 }
 
 async function waitForExpiry() {
-  step(`\n▶ Waiting ${waitSeconds}s for the role JWT to expire`);
+  step(`\n▶ Waiting ${waitSeconds}s for the id_token to expire`);
   await new Promise((r) => setTimeout(r, waitSeconds * 1000));
-  const res = await request(`${EDGE}/`);
-  if (res.status !== 302 || !res.headers.get('location').startsWith('/auth/refresh')) {
-    throw new Error(`expected 302 → /auth/refresh, got HTTP ${res.status} ${res.headers.get('location') ?? ''}`);
+  const res = await request(`${SITE}/`);
+  const location = res.headers.get('location') || '';
+  if (res.status !== 302 || !location.includes('/auth/refresh')) {
+    throw new Error(`expected 302 → …/auth/refresh, got HTTP ${res.status} ${location}`);
   }
-  step(`  ↪ 302 → ${res.headers.get('location').split('?')[0]} (silent re-login, prompt=none)`);
-  const done = await follow(new URL(res.headers.get('location'), EDGE));
+  step(`  ↪ 302 → ${short(location)} (silent re-login, prompt=none)`);
+  const done = await follow(location);
   step(`  ✓ landed on ${short(done.url)} with role ${done.res.headers.get('x-example-role')}`);
   return currentRole();
 }
@@ -180,11 +191,10 @@ function expect(label, actual, expected) {
 
 try {
   const expectedRole = EXPECTED[user] ?? 'none';
-  const after = await login();
-  expect(`role after login (${user})`, after.role, expectedRole);
+  expect(`role after login (${user})`, (await login()).role, expectedRole);
 
   if (scenario === 'logout') {
-    await edgeLogout();
+    await communityLogout();
     expect('role after logout', (await currentRole()).role, 'none');
   } else if (scenario === 'refresh') {
     if (!waitSeconds) throw new Error('--wait N is required');
@@ -193,8 +203,7 @@ try {
     if (!waitSeconds) throw new Error('--wait N is required');
     await idpLogoutDirect();
     expect('role after the IdP session ended', (await waitForExpiry()).role, 'none');
-    const again = await request(`${EDGE}/`);
-    expect('no further redirect (cookie deleted)', String(again.status), '200');
+    expect('no further redirect (cookie deleted)', String((await request(`${SITE}/`)).status), '200');
   } else if (scenario !== 'login') {
     throw new Error(`unknown scenario ${scenario}`);
   }

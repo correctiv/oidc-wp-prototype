@@ -1,5 +1,0 @@
-# Rendered to /etc/varnish/config.vcl at container start (see entrypoint.sh).
-# The tests under tests/ define their own edge_config with fixed test values.
-sub edge_config {
-    var.set("session_key", "@@SESSION_SECRET@@");
-}

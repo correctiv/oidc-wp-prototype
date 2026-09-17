@@ -2,11 +2,13 @@
 # Demonstrates the security and caching properties of the prototype against the running stack.
 #
 #   scripts/demo.sh                 # curl checks + login/logout flows
-#   scripts/demo.sh --with-refresh  # additionally silent refresh (briefly restarts the auth service with a 5s JWT)
+#   scripts/demo.sh --with-refresh  # additionally silent refresh (shortens the id_token lifetime in Keycloak for a moment)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-EDGE=${EDGE_URL:-http://www.localhost:8000}
+SITE=${SITE_URL:-http://www.example.localhost:8000}
+COMMUNITY=${COMMUNITY_URL:-http://community.example.localhost:8000}
+KC=${KC_URL:-http://auth.example.localhost:8080}
 pass=0; fail=0
 
 check() { # label expected actual
@@ -14,33 +16,36 @@ check() { # label expected actual
 }
 header() { local name=$1; shift; curl -s -o /dev/null -D - "$@" | tr -d '\r' | grep -i "^${name}:" | head -1 | sed 's/^[^:]*: *//'; }
 status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+kc_token() { curl -s -d "client_id=admin-cli&username=admin&password=${KC_ADMIN_PASSWORD:-admin}&grant_type=password" "$KC/realms/master/protocol/openid-connect/token" | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])"; }
+kc_set_token_lifespan() { curl -s -o /dev/null -X PUT -H "Authorization: Bearer $(kc_token)" -H "Content-Type: application/json" -d "{\"accessTokenLifespan\": $1}" "$KC/admin/realms/example"; }
 
-echo "━━━ Edge: cache and header hygiene ━━━"
+echo "━━━ HAProxy + Varnish: cache and header hygiene ━━━"
 docker compose exec -T varnish varnishadm ban "req.url ~ ." >/dev/null
-check "1. First request is a MISS"                    "MISS" "$(header x-cache "$EDGE/")"
-check "   Role without a cookie"                      "none" "$(header x-example-role "$EDGE/")"
-check "2. Second request is a HIT"                    "HIT"  "$(header x-cache "$EDGE/")"
-check "3. Forged X-Example-Role is ignored"           "none" "$(header x-example-role -H 'X-Example-Role: full' "$EDGE/")"
-check "   ... and hits the same cache entry"          "none|*" "$(header x-cache-key -H 'X-Example-Role: full' "$EDGE/")"
-check "4. Bogus session cookie yields none"           "none" "$(header x-example-role -b 'example_session=abc.def.ghi' "$EDGE/")"
-check "   ... without a redirect"                     "200"  "$(status -b 'example_session=abc.def.ghi' "$EDGE/")"
-check "5. No Set-Cookie on a cached page"             ""     "$(header set-cookie "$EDGE/")"
-check "6. Assets do not vary by role"                 "-|*"  "$(header x-cache-key "$EDGE/wp-includes/css/dist/block-library/style.min.css")"
-check "7. /wp-admin/ bypasses the cache"              "BYPASS(path)" "$(header x-cache "$EDGE/wp-admin/")"
-check "   /wp-login.php bypasses the cache"           "BYPASS(path)" "$(header x-cache "$EDGE/wp-login.php")"
-check "8. Start page for none shows the login hint"   "1" "$(curl -s "$EDGE/" | grep -c 'You are not logged in')"
-check "   ... and no full-only content"               "0" "$(curl -s "$EDGE/" | grep -c 'Level full only')"
+check "1. First request is a MISS"                    "MISS" "$(header x-cache "$SITE/")"
+check "   Role without a cookie"                      "none" "$(header x-example-role "$SITE/")"
+check "2. Second request is a HIT"                    "HIT"  "$(header x-cache "$SITE/")"
+check "3. Forged X-Example-Role is ignored"           "none" "$(header x-example-role -H 'X-Example-Role: full' "$SITE/")"
+check "   ... and hits the same cache entry"          "none|*" "$(header x-cache-key -H 'X-Example-Role: full' "$SITE/")"
+check "4. Bogus login cookie yields none"             "none" "$(header x-example-role -b 'example_session=abc.def.ghi' "$SITE/")"
+check "   ... without a redirect"                     "200"  "$(status -b 'example_session=abc.def.ghi' "$SITE/")"
+check "   Self-signed HS256 token yields none"        "none" "$(header x-example-role -b "example_session=$(node -e "import('jose').then(async j=>{const k=new TextEncoder().encode('x'.repeat(32));console.log(await new j.SignJWT({example_role:'full',iss:'http://auth.example.localhost:8080/realms/example',aud:'community-app'}).setProtectedHeader({alg:'HS256'}).setExpirationTime('1h').sign(k))})" 2>/dev/null || echo bad)" "$SITE/")"
+check "5. No Set-Cookie on a cached page"             ""     "$(header set-cookie "$SITE/")"
+check "6. Assets do not vary by role"                 "-|*"  "$(header x-cache-key "$SITE/wp-includes/css/dist/block-library/style.min.css")"
+check "7. /wp-admin/ bypasses the cache"              "BYPASS(path)" "$(header x-cache "$SITE/wp-admin/")"
+check "   /wp-login.php bypasses the cache"           "BYPASS(path)" "$(header x-cache "$SITE/wp-login.php")"
+check "8. Start page for none shows the login hint"   "1" "$(curl -s "$SITE/" | grep -c 'You are not logged in')"
+check "   ... and no full-only content"               "0" "$(curl -s "$SITE/" | grep -c 'Level full only')"
 
-echo; echo "━━━ OIDC flow ━━━"
-LOGIN_LOC=$(header location "$EDGE/auth/login?return=/members/")
-check "9. /auth/login redirects to the IdP"          "http://auth.localhost:8080/realms/example/protocol/openid-connect/auth?*" "$LOGIN_LOC"
+echo; echo "━━━ Community app: OIDC flow ━━━"
+LOGIN_LOC=$(header location "$COMMUNITY/auth/login?return=$SITE/members/")
+check "9. /auth/login redirects to the IdP"           "$KC/realms/example/protocol/openid-connect/auth?*" "$LOGIN_LOC"
 check "    ... with PKCE S256"                        "*code_challenge_method=S256*" "$LOGIN_LOC"
 check "    ... with scope=openid only"                "*scope=openid&*" "$LOGIN_LOC"
-check "    ... and no-store"                          "no-store" "$(header cache-control "$EDGE/auth/login")"
-check "    ... uncached via the auth backend"         "BYPASS(auth)" "$(header x-cache "$EDGE/auth/login")"
-# The return path is signed into the example_auth cookie; external targets must become "/".
-RT=$(header set-cookie "$EDGE/auth/login?return=https://evil.example" | sed 's/^example_auth=//; s/;.*//' | cut -d. -f2 | python3 -c "import base64,json,sys; t=sys.stdin.read().strip(); print(json.loads(base64.urlsafe_b64decode(t + '=' * (-len(t) % 4)))['returnTo'])")
-check "10. Open redirects are neutralised"            "/"    "$RT"
+check "    ... and no-store"                          "no-store" "$(header cache-control "$COMMUNITY/auth/login")"
+# The return URL is signed into the example_auth cookie; foreign hosts must fall back to the community home.
+RT=$(header set-cookie "$COMMUNITY/auth/login?return=https://evil.example/" | sed 's/^example_auth=//; s/;.*//' | cut -d. -f2 | python3 -c "import base64,json,sys; t=sys.stdin.read().strip(); print(json.loads(base64.urlsafe_b64decode(t + '=' * (-len(t) % 4)))['returnTo'])")
+check "10. Open redirects are neutralised"            "$COMMUNITY/" "$RT"
+check "11. Community home answers"                    "200" "$(status "$COMMUNITY/")"
 
 echo
 for u in anna ben carla; do node scripts/login-flow.mjs login "$u" || ((fail++)); done
@@ -50,12 +55,12 @@ echo; echo "━━━ Varnish counters ━━━"
 docker compose exec -T varnish varnishstat -1 -f MAIN.cache_hit -f MAIN.cache_miss -f MAIN.s_pass -f MAIN.n_object | awk '{printf "  %-18s %s\n", $1, $2}'
 
 if [[ "${1:-}" == "--with-refresh" ]]; then
-  echo; echo "━━━ Silent refresh (auth service briefly running with SESSION_TTL_SECONDS=5) ━━━"
-  SESSION_TTL_SECONDS=5 docker compose up -d auth >/dev/null 2>&1; sleep 3
+  echo; echo "━━━ Silent refresh (id_token lifetime temporarily 5s in Keycloak) ━━━"
+  kc_set_token_lifespan 5
   node scripts/login-flow.mjs refresh anna --wait 7 || ((fail++))
   node scripts/login-flow.mjs refresh-fail ben --wait 7 || ((fail++))
-  docker compose up -d auth >/dev/null 2>&1
-  echo "(auth service restarted with the normal TTL)"
+  kc_set_token_lifespan 900
+  echo "(id_token lifetime restored to 900s)"
 fi
 
 echo; echo "curl checks: $pass passed, $fail failed (login flows: see ✅/❌ above)"

@@ -14,7 +14,7 @@
   "defaultLocale": "de",
   "ssoSessionIdleTimeout": 1800,
   "ssoSessionMaxLifespan": 36000,
-  "accessTokenLifespan": 300,
+  "accessTokenLifespan": 900,
   "components": {
     "org.keycloak.userprofile.UserProfileProvider": [
       {
@@ -26,22 +26,75 @@
           ]
         }
       }
+    ],
+    "org.keycloak.keys.KeyProvider": [
+      {
+        "name": "hmac-generated-hs512",
+        "providerId": "hmac-generated",
+        "subComponents": {},
+        "config": {
+          "priority": [
+            "100"
+          ],
+          "algorithm": [
+            "HS512"
+          ]
+        }
+      },
+      {
+        "name": "aes-generated",
+        "providerId": "aes-generated",
+        "subComponents": {},
+        "config": {
+          "priority": [
+            "100"
+          ]
+        }
+      },
+      {
+        "name": "rsa-demo",
+        "providerId": "rsa",
+        "subComponents": {},
+        "config": {
+          "privateKey": [
+            "MIIEogIBAAKCAQEAgyqZogw02X2JzeCrOI7PLoyQJrRW96bhsZl3RXF+RYKmsh+zZeWQs1j/WQswDkJaXokWgBngpKpwlN+87k0MQSvqzblMpRIaWOSGHPSp2ct2dnaiaMlJ7IdPUpZMM9/u9nkVjiLda2oYXfKNFTgUizNgiOYOHz7a9AuHVsk1GOrYKM5yMCdU6e3KM7W/W0vmU1hFHL4EBDagmzes81VDAIvw2Mh7/sl1CZrz7A7tycYZd9PGO42kXrx1RYfgdHHYuI7SozOR9fmQWdWbLuMpV4u7eJGO14F0lvIk/s5US/5WyhRdVUBm1oeX+xyjb+RMyrckVCLrPFW1KgnbpdKiewIDAQABAoIBAAvoHuh6vYTCucgybV3lz4E1FFQsdGU9xRNx+sWXLwm7TvYwx4Bn+Ec3kdJw9WH4pwBu5wJ7luILxiAq4UPWmFawLbvoEWuTUEiifK7TN49EQigweRS/ClK02RVbpxDhx+z1gpM+Wfret4CLvJU2W925AmSFpwwyEKktBLzy6JAu3BSaYOEEU3cG721UPpFi2bqMXEh5RNLeTMnjGIMIWZNgoEX3LyIdc021P7jfrI9inPgCTPINV5nlbZtpChEjP5bT78ug74ubbv3oBGkBisMtN3D169HFYj6kpSl/EAn8vDtKbInDqve4tlGaPfaet0NyrNzkqgVQenrQycWT9AUCgYEAt72YvvApuQeogSJ4p52mrYVElvPbQLEwUr2S/qoOeBuJFuu8rdwEk7jDKaj5Cmih8IVK88BRrJQbfsiq6f3am1kyOEfu1mruwh5cZ0uRbDOPv3EchzceinYLa4KtOWPAuokI5t4/COFuUcdVXNUDvPfssB50DS7Nq1Hc3xk2Dl0CgYEAtsABLJaVCzZFnDE7buxz2lsUSGe3YcJpr2qu4jDTjrLMofIPo06OkjBaInwzGExUBFgVcWxwzb81upaKEGVzZjhf0zKuGfdWoSn7GbH+QtJw5weI58SYeTL1Jf099pRak0fsTu688c2cHbtwXxL9vfP4dmTooE3QHDwchffV9rcCgYBDcZy3uYAXIvB/NiADpqKf3uMmZax9Ooz6Ugu63sEg5TqU50MCrlgfwRoiGJwRbgbDOqogft978YGGMDJMYZn0m/ELJ5xLqESrjGluoRZoGSUSqHpIR7s2J85ZUEY1YqBD2DkkRT/uCpFsAzcaNDaDDp4ap5MBo8RqtknUunRVIQKBgEUZXFhLp5dRsghY5SwP485QWd72uHQSWnulTvLfm159ZLpnGFqbPXUxKyOW6orpcWsjExiL9CsXfW1LtnB0q6me7zygEQxoZS0S/oq8rnL9twrj4nQf9bb9+YufsWomtgiyTTubMX4MTFdBpD+OorrMIMpDZWIXifTjFbXh+9kJAoGAMpHf/GClePAYtXtPc/o1DSUOqjvInucv8lOop9swqJ6XhaIlzw63sjoYodQnW2aLcDfBhF/GAzaXtji1JR3TXgAzM8PgGaTFioZGuGA9WvbtGwT+jisjkfmw1UjdqakheRyZK6mgeQjf2ClpbWfJWWhNZXCijIhg1NGXPbl4VWI="
+          ],
+          "certificate": [
+            "MIIDFzCCAf+gAwIBAgIUTSN7f8D8v+F9eSJp2qCbwKYPk9gwDQYJKoZIhvcNAQELBQAwGzEZMBcGA1UEAwwQZXhhbXBsZS1pZHAtZGVtbzAeFw0yNjA5MTcwOTEyNTJaFw0zNjA5MTQwOTEyNTJaMBsxGTAXBgNVBAMMEGV4YW1wbGUtaWRwLWRlbW8wggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCDKpmiDDTZfYnN4Ks4js8ujJAmtFb3puGxmXdFcX5FgqayH7Nl5ZCzWP9ZCzAOQlpeiRaAGeCkqnCU37zuTQxBK+rNuUylEhpY5IYc9KnZy3Z2dqJoyUnsh09Slkwz3+72eRWOIt1rahhd8o0VOBSLM2CI5g4fPtr0C4dWyTUY6tgoznIwJ1Tp7coztb9bS+ZTWEUcvgQENqCbN6zzVUMAi/DYyHv+yXUJmvPsDu3Jxhl308Y7jaRevHVFh+B0cdi4jtKjM5H1+ZBZ1Zsu4ylXi7t4kY7XgXSW8iT+zlRL/lbKFF1VQGbWh5f7HKNv5EzKtyRUIus8VbUqCdul0qJ7AgMBAAGjUzBRMB0GA1UdDgQWBBSD1CHynXMm+bUojvyQl69HXZhQyjAfBgNVHSMEGDAWgBSD1CHynXMm+bUojvyQl69HXZhQyjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQAsqwhPmnm6R8uNvBiNLNfGoJTNktm7vmtV01rS7S6UMMjGtN0iPyZ8Y+s0VToMiJ7Ek174Vdu6ubeisJBspfNtRnf+qqQb7IfRuu8Q8Xyo5zww++eXAMO+Jfzb0OzI/mKFm12bACt6XXHNYxarbMGZi28zy/KpDvGFlA8MCXhIlhagNVSLZXL9QXKzcIisiF3zSipQNsDvn3np5vM1j3Zn+RsVxxgr+U6ErQxRziOhalkjtvosvfyUh1yEcAAaH3kiXfppmOkMEgQMXsi7dVyq/9jOpQqxe2MxZuGfCf49EJ/L6BO5VqxsBgQKqVdTn3L8BRtjUbrJk9a7sMSC+n4h"
+          ],
+          "priority": [
+            "100"
+          ],
+          "enabled": [
+            "true"
+          ],
+          "active": [
+            "true"
+          ],
+          "algorithm": [
+            "RS256"
+          ],
+          "keyUse": [
+            "SIG"
+          ]
+        }
+      }
     ]
   },
   "clients": [
     {
-      "clientId": "example-web",
-      "name": "Example website (edge as relying party)",
-      "description": "The edge in front of WordPress. WordPress itself is not an OIDC client.",
+      "clientId": "community-app",
+      "name": "Community app (the OIDC relying party)",
+      "description": "The community app logs users in and sets the login cookie for the whole example.localhost domain. WordPress is not an OIDC client.",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": false,
       "clientAuthenticatorType": "client-secret",
-      "secret": "example-web-demo-secret",
-      "rootUrl": "http://www.localhost:8000",
+      "secret": "community-app-demo-secret",
+      "rootUrl": "http://community.example.localhost:8000",
       "baseUrl": "/",
       "redirectUris": [
-        "http://www.localhost:8000/auth/callback"
+        "http://community.example.localhost:8000/auth/callback"
       ],
       "webOrigins": [],
       "standardFlowEnabled": true,
@@ -53,7 +106,7 @@
       "fullScopeAllowed": false,
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://www.localhost:8000/*",
+        "post.logout.redirect.uris": "http://www.example.localhost:8000/*##http://community.example.localhost:8000/*",
         "backchannel.logout.session.required": "false"
       },
       "defaultClientScopes": [

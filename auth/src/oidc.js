@@ -1,15 +1,12 @@
 // OIDC relying party built on openid-client (https://github.com/panva/openid-client).
 //
 // The library handles discovery, PKCE, the code exchange and the full id_token validation
-// (signature via JWKS, iss, aud, exp, nonce). This module reads exactly one claim from the
-// validated id_token (the role) and discards the rest.
+// (signature via JWKS, iss, aud, exp, nonce). The validated id_token is what ends up in the
+// login cookie; HAProxy verifies it again on every request with the IdP's public key.
 
 import * as client from 'openid-client';
 
-export const ROLES = ['none', 'limited', 'full'];
-export const normalizeRole = (value) => (ROLES.includes(value) ? value : 'none');
-
-export function createOidc({ issuer, clientId, clientSecret, redirectUri, roleClaim, debugClaims = false }) {
+export function createOidc({ issuer, clientId, clientSecret, redirectUri, debugClaims = false }) {
   let discovered = null;
 
   // Discovers the IdP lazily on first use and caches the result. A failed discovery (e.g. the
@@ -56,7 +53,7 @@ export function createOidc({ issuer, clientId, clientSecret, redirectUri, roleCl
     },
 
     /**
-     * Exchanges the code, validates the id_token and returns nothing but the role.
+     * Exchanges the code and returns the validated id_token together with its claims.
      * @param {URL} callbackUrl the callback URL exactly as the browser requested it
      */
     async completeLogin(callbackUrl, { state, nonce, codeVerifier }) {
@@ -67,9 +64,9 @@ export function createOidc({ issuer, clientId, clientSecret, redirectUri, roleCl
         idTokenExpected: true,
       });
       const claims = tokens.claims();
-      // Claim names only, no values: demonstrates that the token carries no PII besides sub.
+      // Claim names only, no values: shows what the token that ends up in the cookie carries.
       if (debugClaims) console.log(`[oidc] id_token claims: ${Object.keys(claims).join(', ')}`);
-      return normalizeRole(claims[roleClaim]);
+      return { idToken: tokens.id_token, claims };
     },
 
     /** RP-initiated logout URL. client_id is added by the library; no id_token_hint on purpose. */
