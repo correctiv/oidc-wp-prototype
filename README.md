@@ -89,7 +89,7 @@ sequenceDiagram
     H->>C: route by hostname
     C->>K: POST /token (code, verifier, client_secret) [back channel]
     K->>C: id_token (sub, example_role, timestamps)
-    C->>B: 302 → http://www…/members/<br/>Set-Cookie example_session = id_token; Domain=example.localhost
+    C->>B: 302 → http://www…/members/<br/>Set-Cookie example_session = id_token, Domain=example.localhost
     Note over B,W: WordPress was not involved in any step.
 ```
 
