@@ -7,7 +7,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 SITE=${SITE_URL:-http://www.example.localhost:8000}
-COMMUNITY=${COMMUNITY_URL:-http://community.example.localhost:8000}
+COMMUNITY=${COMMUNITY_URL:-http://community.example.localhost:8001}
 KC=${KC_URL:-http://auth.example.localhost:8080}
 pass=0; fail=0
 
@@ -35,6 +35,7 @@ check "7. /wp-admin/ bypasses the cache"              "BYPASS(path)" "$(header x
 check "   /wp-login.php bypasses the cache"           "BYPASS(path)" "$(header x-cache "$SITE/wp-login.php")"
 check "8. Start page for none shows the login hint"   "1" "$(curl -s "$SITE/" | grep -c 'You are not logged in')"
 check "   ... and no full-only content"               "0" "$(curl -s "$SITE/" | grep -c 'Level full only')"
+check "   Login link points at the community app"     "$COMMUNITY/auth/login?return=*" "$(curl -s "$SITE/" | grep -oE 'href="[^"]*auth/login[^"]*"' | head -1 | sed 's/href="//; s/"$//; s/&amp;/\&/g')"
 
 echo; echo "━━━ Community app: OIDC flow ━━━"
 LOGIN_LOC=$(header location "$COMMUNITY/auth/login?return=$SITE/members/")
@@ -46,9 +47,15 @@ check "    ... and no-store"                          "no-store" "$(header cache
 RT=$(header set-cookie "$COMMUNITY/auth/login?return=https://evil.example/" | sed 's/^example_auth=//; s/;.*//' | cut -d. -f2 | python3 -c "import base64,json,sys; t=sys.stdin.read().strip(); print(json.loads(base64.urlsafe_b64decode(t + '=' * (-len(t) % 4)))['returnTo'])")
 check "10. Open redirects are neutralised"            "$COMMUNITY/" "$RT"
 check "11. Community home answers"                    "200" "$(status "$COMMUNITY/")"
+check "12. /contact/me without login is 401"          "401" "$(status -H "Origin: $SITE" "$COMMUNITY/contact/me")"
+check "    ... with CORS for the website's origin"    "$SITE" "$(header access-control-allow-origin -H "Origin: $SITE" "$COMMUNITY/contact/me")"
+check "    ... and credentials allowed"               "true" "$(header access-control-allow-credentials -H "Origin: $SITE" "$COMMUNITY/contact/me")"
+check "    ... but not for a foreign origin"          ""     "$(header access-control-allow-origin -H "Origin: https://evil.example" "$COMMUNITY/contact/me")"
+check "    No contact card in the anonymous variant"  "0"    "$(curl -s "$SITE/" | grep -c 'class="example-contact-card"')"
+check "    ... and no username in any cached page"    "0"    "$(curl -s "$SITE/" | grep -c 'anna')"
 
 echo
-for u in anna ben carla; do node scripts/login-flow.mjs login "$u" || ((fail++)); done
+for u in anna ben; do node scripts/login-flow.mjs login "$u" || ((fail++)); done
 node scripts/login-flow.mjs logout anna || ((fail++))
 
 echo; echo "━━━ Varnish counters ━━━"

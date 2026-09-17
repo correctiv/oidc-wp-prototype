@@ -1,37 +1,55 @@
-// Login state and small helpers of the community app stand-in.
+// Signed cookies and small helpers of the community app stand-in. The signing key is private to
+// this app; nothing else needs to read these cookies.
 //
-// The auth-state JWT carries state, nonce, PKCE verifier and the return URL through the login
-// redirect in a short-lived cookie, so the app stays stateless. Its key is private to this app.
+// - auth state: state, nonce, PKCE verifier and return URL travel through the login redirect in a
+//   short-lived cookie, so the app stays stateless.
+// - community session: the app's own login session with the profile it fetched at login. This is
+//   where personal data lives; the domain-wide id_token cookie stays lean.
 
 import { SignJWT, jwtVerify } from 'jose';
 
 export const AUTH_COOKIE = 'example_auth';
+export const COMMUNITY_COOKIE = 'community_session';
 const AUTHSTATE_TYP = 'example-authstate+jwt';
+const COMMUNITY_TYP = 'example-community-session+jwt';
 
-export function createAuthState({ secret, ttlSeconds = 300, allowedReturnHosts, fallbackReturn }) {
+function signer(secret, typ) {
   const key = new TextEncoder().encode(secret);
-  const sanitise = (value) => safeReturnUrl(value, allowedReturnHosts, fallbackReturn);
   return {
-    sanitiseReturn: sanitise,
-
-    /** @param {{state:string, nonce:string, codeVerifier:string, returnTo:string, silent:boolean}} data */
-    mint: (data) =>
-      new SignJWT(data)
-        .setProtectedHeader({ alg: 'HS256', typ: AUTHSTATE_TYP })
-        .setIssuedAt()
-        .setExpirationTime(`${ttlSeconds}s`)
-        .sign(key),
-
-    /** Returns the auth state or null if the token is missing, expired or tampered. */
+    sign: (payload, ttlSeconds) =>
+      new SignJWT(payload).setProtectedHeader({ alg: 'HS256', typ }).setIssuedAt().setExpirationTime(`${ttlSeconds}s`).sign(key),
     async verify(token) {
       if (!token) return null;
       try {
-        const { payload } = await jwtVerify(token, key, { algorithms: ['HS256'], typ: AUTHSTATE_TYP });
-        return { ...payload, returnTo: sanitise(payload.returnTo) };
+        return (await jwtVerify(token, key, { algorithms: ['HS256'], typ })).payload;
       } catch {
         return null;
       }
     },
+  };
+}
+
+export function createAuthState({ secret, ttlSeconds = 300, allowedReturnHosts, fallbackReturn }) {
+  const jwt = signer(secret, AUTHSTATE_TYP);
+  const sanitise = (value) => safeReturnUrl(value, allowedReturnHosts, fallbackReturn);
+  return {
+    sanitiseReturn: sanitise,
+    /** @param {{state:string, nonce:string, codeVerifier:string, returnTo:string, silent:boolean}} data */
+    mint: (data) => jwt.sign(data, ttlSeconds),
+    /** Returns the auth state or null if the token is missing, expired or tampered. */
+    async verify(token) {
+      const payload = await jwt.verify(token);
+      return payload && { ...payload, returnTo: sanitise(payload.returnTo) };
+    },
+  };
+}
+
+export function createCommunitySession({ secret }) {
+  const jwt = signer(secret, COMMUNITY_TYP);
+  return {
+    /** @param {{sub:string, username?:string, role:string}} profile lives as long as the id_token */
+    mint: (profile, ttlSeconds) => jwt.sign(profile, ttlSeconds),
+    verify: (token) => jwt.verify(token),
   };
 }
 

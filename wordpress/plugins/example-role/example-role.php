@@ -44,15 +44,22 @@ function example_role_at_least( string $min ): bool {
 }
 
 /**
- * Path of the current page, used as the return target after login.
+ * Base URL of the community app, which handles login and logout for the whole domain.
+ */
+function example_role_community_url(): string {
+	return defined( 'EXAMPLE_COMMUNITY_URL' ) ? rtrim( (string) EXAMPLE_COMMUNITY_URL, '/' ) : '';
+}
+
+/**
+ * Absolute URL of the current page, used as the return target after login or logout.
  * Contains no user data; it is part of the page cached per role.
  */
-function example_role_current_path(): string {
+function example_role_current_url(): string {
 	$uri = isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '/';
 	if ( '' === $uri || '/' !== $uri[0] || str_starts_with( $uri, '//' ) ) {
-		return '/';
+		$uri = '/';
 	}
-	return $uri;
+	return home_url( $uri );
 }
 
 /**
@@ -105,7 +112,7 @@ add_shortcode(
 	'example_login_link',
 	function ( $atts ) {
 		$atts = shortcode_atts( array( 'text' => 'Log in' ), $atts, 'example_login_link' );
-		$href = '/auth/login?return=' . rawurlencode( example_role_current_path() );
+		$href = example_role_community_url() . '/auth/login?return=' . rawurlencode( example_role_current_url() );
 		return sprintf( '<a class="example-role-link" href="%s">%s</a>', esc_url( $href ), esc_html( $atts['text'] ) );
 	}
 );
@@ -115,7 +122,40 @@ add_shortcode(
 	'example_logout_link',
 	function ( $atts ) {
 		$atts = shortcode_atts( array( 'text' => 'Log out' ), $atts, 'example_logout_link' );
-		return sprintf( '<a class="example-role-link" href="%s">%s</a>', esc_url( '/auth/logout' ), esc_html( $atts['text'] ) );
+		$href = example_role_community_url() . '/auth/logout?return=' . rawurlencode( example_role_current_url() );
+		return sprintf( '<a class="example-role-link" href="%s">%s</a>', esc_url( $href ), esc_html( $atts['text'] ) );
+	}
+);
+
+/**
+ * [example_contact_card]
+ *
+ * Personal data never enters the cached page. The browser fetches it from the community app
+ * after the page has loaded; the cookies go along because both hosts share the parent domain.
+ * Anonymous visitors get a 401 and see nothing, so the shortcode only makes sense inside a
+ * block that is shown from level "limited" upwards.
+ */
+add_shortcode(
+	'example_contact_card',
+	function () {
+		$endpoint = example_role_community_url() . '/contact/me';
+		return sprintf(
+			'<div class="example-contact-card" data-endpoint="%s" hidden></div>
+<script>
+(function () {
+	var card = document.currentScript.previousElementSibling;
+	fetch(card.dataset.endpoint, { credentials: "include" })
+		.then(function (res) { return res.ok ? res.json() : null; })
+		.then(function (me) {
+			if (!me) { return; }
+			card.textContent = "Logged in at the community as " + (me.username || me.id) + ". This box was filled by your browser; the cached page does not contain it.";
+			card.hidden = false;
+		})
+		.catch(function () {});
+})();
+</script>',
+			esc_url( $endpoint )
+		);
 	}
 );
 
@@ -144,6 +184,7 @@ add_action(
 .example-role-badge--limited{background:#fde68a}
 .example-role-badge--full{background:#86efac}
 .example-role-link{display:inline-block;padding:.4em 1em;border:1px solid currentColor;border-radius:.4em;text-decoration:none}
+.example-contact-card{margin:1em 0;padding:.75em 1em;border-left:4px solid #86efac;background:#f0fdf4}
 </style>';
 	}
 );

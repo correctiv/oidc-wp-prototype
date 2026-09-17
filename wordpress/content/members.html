@@ -1,17 +1,22 @@
 <p>[example_role_badge]</p>
 
 [example_role_content only="none"]
-<p>The members area is only visible with an access level.</p>
+<p>The members area is only visible to logged-in users.</p>
 <p>[example_login_link text="Log in and return here"]</p>
 [/example_role_content]
 
 [example_role_content min="limited"]
+[example_contact_card]
 <p>Welcome to the members area. This page has its own cache entry per level, independent of the start page.</p>
 [/example_role_content]
 
 [example_role_content min="full"]
 <h2>Full only</h2>
 <p>The complete area.</p>
+[/example_role_content]
+
+[example_role_content min="limited"]
+<p>[example_logout_link text="Log out"]</p>
 [/example_role_content]
 
 <p><a href="/">Back to the start page</a></p>

@@ -1,14 +1,15 @@
 <p>[example_role_badge]</p>
 
 <h2>Public</h2>
-<p>This section is visible to everyone, including access level <code>none</code>. The page is cached exactly once per access level, never per person.</p>
+<p>This section is visible to everyone. The page is cached exactly once per access level, never per person; <code>none</code> is the variant anonymous visitors get.</p>
 
 [example_role_content only="none"]
-<p><strong>You are not logged in, or you have no access level.</strong></p>
+<p><strong>You are not logged in.</strong></p>
 <p>[example_login_link text="Log in now"]</p>
 [/example_role_content]
 
 [example_role_content min="limited"]
+[example_contact_card]
 <h2>From level limited</h2>
 <p>This section is visible to <code>limited</code> and <code>full</code>.</p>
 [/example_role_content]
@@ -22,5 +23,9 @@
 <p>Exclusive content for <code>full</code>. See also the <a href="/members/">members area</a>.</p>
 [/example_role_content]
 
+[example_role_content min="limited"]
+<p>[example_logout_link text="Log out"]</p>
+[/example_role_content]
+
 <hr>
-<p><small>WordPress only knows the <code>X-Example-Role</code> header. There is no user account, no session cookie and no personalisation here. If you are logged in at the IdP: [example_logout_link text="Log out"]</small></p>
+<p><small>WordPress only knows the <code>X-Example-Role</code> header. There is no user account, no session cookie and no personalisation in the cached page. The only personal thing on this page, the box with your name, is filled in by your browser from the community app.</small></p>

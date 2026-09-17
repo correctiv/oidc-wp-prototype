@@ -91,10 +91,10 @@
       "publicClient": false,
       "clientAuthenticatorType": "client-secret",
       "secret": "community-app-demo-secret",
-      "rootUrl": "http://community.example.localhost:8000",
+      "rootUrl": "http://community.example.localhost:8001",
       "baseUrl": "/",
       "redirectUris": [
-        "http://community.example.localhost:8000/auth/callback"
+        "http://community.example.localhost:8001/auth/callback"
       ],
       "webOrigins": [],
       "standardFlowEnabled": true,
@@ -106,7 +106,7 @@
       "fullScopeAllowed": false,
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://www.example.localhost:8000/*##http://community.example.localhost:8000/*",
+        "post.logout.redirect.uris": "http://www.example.localhost:8000/*##http://community.example.localhost:8001/*",
         "backchannel.logout.session.required": "false"
       },
       "defaultClientScopes": [
@@ -126,6 +126,24 @@
             "id.token.claim": "true",
             "access.token.claim": "false",
             "userinfo.token.claim": "false",
+            "introspection.token.claim": "false",
+            "lightweight.claim": "false",
+            "multivalued": "false",
+            "aggregate.attrs": "false"
+          }
+        },
+        {
+          "name": "preferred_username",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "username",
+            "claim.name": "preferred_username",
+            "jsonType.label": "String",
+            "id.token.claim": "false",
+            "access.token.claim": "false",
+            "userinfo.token.claim": "true",
             "introspection.token.claim": "false",
             "lightweight.claim": "false",
             "multivalued": "false",
@@ -164,20 +182,6 @@
           "limited"
         ]
       },
-      "credentials": [
-        {
-          "type": "password",
-          "value": "password",
-          "temporary": false
-        }
-      ]
-    },
-    {
-      "username": "carla",
-      "enabled": true,
-      "emailVerified": true,
-      "requiredActions": [],
-      "attributes": {},
       "credentials": [
         {
           "type": "password",

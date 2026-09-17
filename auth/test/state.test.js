@@ -3,8 +3,8 @@ import { test } from 'node:test';
 import { decodeJwt } from 'jose';
 import { createAuthState, parseCookies, safeReturnUrl } from '../src/state.js';
 
-const hosts = ['www.example.localhost:8000', 'community.example.localhost:8000'];
-const fallback = 'http://community.example.localhost:8000/';
+const hosts = ['www.example.localhost:8000', 'community.example.localhost:8001'];
+const fallback = 'http://community.example.localhost:8001/';
 const authState = createAuthState({ secret: 'test-secret-test-secret-test-secret-1234', allowedReturnHosts: hosts, fallbackReturn: fallback });
 const data = { state: 's1', nonce: 'n1', codeVerifier: 'cv1', returnTo: 'http://www.example.localhost:8000/members/', silent: true };
 
@@ -45,4 +45,15 @@ test('safeReturnUrl: allowlisted absolute URLs and relative paths only', () => {
 test('parseCookies: parses a Cookie header', () => {
   assert.deepEqual(parseCookies('a=1; example_session=x.y.z; b=2'), { a: '1', example_session: 'x.y.z', b: '2' });
   assert.deepEqual(parseCookies(undefined), {});
+});
+
+test('community session: round trip, and not interchangeable with the auth state', async () => {
+  const { createCommunitySession } = await import('../src/state.js');
+  const session = createCommunitySession({ secret: 'test-secret-test-secret-test-secret-1234' });
+  const token = await session.mint({ sub: 'u1', username: 'anna', role: 'full' }, 60);
+  const back = await session.verify(token);
+  assert.equal(back.username, 'anna');
+  assert.equal(back.role, 'full');
+  assert.equal(await authState.verify(token), null);
+  assert.equal(await session.verify(await authState.mint(data)), null);
 });

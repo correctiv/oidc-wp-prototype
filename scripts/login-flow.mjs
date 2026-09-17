@@ -4,7 +4,6 @@
 //
 //   node scripts/login-flow.mjs login anna                 # expects role full on the website
 //   node scripts/login-flow.mjs login ben                  # expects role limited
-//   node scripts/login-flow.mjs login carla                # expects role none (logged in, but no level)
 //   node scripts/login-flow.mjs logout anna                # login, then logout via the community app -> none
 //   node scripts/login-flow.mjs refresh anna --wait 7      # login, let the id_token expire -> silent re-login keeps the role
 //   node scripts/login-flow.mjs refresh-fail anna --wait 7 # login, end the IdP session, let the token expire -> none
@@ -16,9 +15,9 @@
 // context). curl drops such cookies over http, which is why this script exists instead of curl.
 
 const SITE = process.env.SITE_URL || 'http://www.example.localhost:8000';
-const COMMUNITY = process.env.COMMUNITY_URL || 'http://community.example.localhost:8000';
+const COMMUNITY = process.env.COMMUNITY_URL || 'http://community.example.localhost:8001';
 const IDP = process.env.IDP_URL || 'http://auth.example.localhost:8080/realms/example';
-const EXPECTED = { anna: 'full', ben: 'limited', carla: 'none' };
+const EXPECTED = { anna: 'full', ben: 'limited' };
 // Text markers from the demo content, used to show which sections are visible.
 const SECTIONS = ['You are not logged in', 'From level limited', 'You have limited access', 'Level full only'];
 
@@ -143,7 +142,19 @@ async function login() {
   step(`  ✓ cookies sent to ${siteHost}: ${cookieNames(siteHost)}`);
   step(`  ✓ cookies sent to ${new URL(COMMUNITY).hostname}: ${cookieNames(new URL(COMMUNITY).hostname)}`);
   step(`  ✓ cookies sent to ${new URL(IDP).hostname}: ${cookieNames(new URL(IDP).hostname)}`);
+  await contactMe();
   return currentRole();
+}
+
+/** What the website's client-side call sees: same-site XHR with cookies, answered with CORS headers. */
+async function contactMe() {
+  const res = await request(`${COMMUNITY}/contact/me`, { headers: { origin: SITE, accept: 'application/json' } });
+  const body = res.status === 200 ? await res.json() : null;
+  step(`  ☐ GET /contact/me from origin ${SITE}: HTTP ${res.status}, ` +
+    `Access-Control-Allow-Origin=${res.headers.get('access-control-allow-origin')}, ` +
+    `Access-Control-Allow-Credentials=${res.headers.get('access-control-allow-credentials')}` +
+    (body ? `, username=${body.username}, role=${body.role}` : ''));
+  return body;
 }
 
 async function communityLogout() {
@@ -190,12 +201,15 @@ function expect(label, actual, expected) {
 }
 
 try {
-  const expectedRole = EXPECTED[user] ?? 'none';
+  const expectedRole = EXPECTED[user];
+  if (!expectedRole) throw new Error(`unknown demo user ${user}`);
   expect(`role after login (${user})`, (await login()).role, expectedRole);
+  expect(`/contact/me knows the user (${user})`, (await contactMe())?.username, user);
 
   if (scenario === 'logout') {
     await communityLogout();
     expect('role after logout', (await currentRole()).role, 'none');
+    expect('/contact/me after logout', String((await request(`${COMMUNITY}/contact/me`, { headers: { origin: SITE } })).status), '401');
   } else if (scenario === 'refresh') {
     if (!waitSeconds) throw new Error('--wait N is required');
     expect('role after silent refresh', (await waitForExpiry()).role, expectedRole);

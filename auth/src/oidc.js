@@ -66,7 +66,15 @@ export function createOidc({ issuer, clientId, clientSecret, redirectUri, debugC
       const claims = tokens.claims();
       // Claim names only, no values: shows what the token that ends up in the cookie carries.
       if (debugClaims) console.log(`[oidc] id_token claims: ${Object.keys(claims).join(', ')}`);
-      return { idToken: tokens.id_token, claims };
+      // Profile data comes from userinfo and stays in this app's own session; it is never part of
+      // the id_token and therefore never reaches the domain-wide cookie.
+      let userinfo = {};
+      try {
+        userinfo = await client.fetchUserInfo(await configuration(), tokens.access_token, claims.sub);
+      } catch (err) {
+        console.warn(`[oidc] userinfo unavailable: ${err.message}`);
+      }
+      return { idToken: tokens.id_token, claims, userinfo };
     },
 
     /** RP-initiated logout URL. client_id is added by the library; no id_token_hint on purpose. */

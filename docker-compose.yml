@@ -1,12 +1,12 @@
 # Prototype: OIDC login with role-based edge caching for WordPress
 #
-#   Browser ──► www.example.localhost:8000 ──► haproxy ──► varnish ──► wordpress ──► db
-#               community.example.localhost:8000 ──┘  └──► auth (community app stand-in, OIDC RP)
-#      └──────► auth.example.localhost:8080 (keycloak, playing the IdP)
+#   Browser ──► www.example.localhost:8000       haproxy ──► varnish ──► wordpress ──► db
+#      ├──────► community.example.localhost:8001 auth (community app stand-in, the OIDC RP)
+#      └──────► auth.example.localhost:8080      keycloak (playing the IdP)
 #
-# Only HAProxy and Keycloak publish ports. Varnish, the auth service and WordPress are reachable
-# on the Docker network only; in production a firewall or private network must guarantee the
-# same, otherwise X-Example-Role could be forged.
+# Varnish and WordPress are reachable on the Docker network only; in production a firewall or
+# private network must guarantee the same, otherwise X-Example-Role could be forged. The
+# community app is its own public service, as in production.
 
 x-wp-env: &wp-env
   WORDPRESS_DB_HOST: db
@@ -18,6 +18,7 @@ x-wp-env: &wp-env
     define('WP_HOME', 'http://www.example.localhost:8000');
     define('WP_SITEURL', 'http://www.example.localhost:8000');
     define('EXAMPLE_ROLE_CACHE_TTL', 60);
+    define('EXAMPLE_COMMUNITY_URL', 'http://community.example.localhost:8001');
     define('DISABLE_WP_CRON', true);
 
 x-wp-volumes: &wp-volumes
@@ -92,20 +93,22 @@ services:
   auth:
     build: ./auth
     command: ["node", "--watch", "src/index.js"]
+    ports:
+      - "8001:3000"
     depends_on:
       - keycloak
     environment:
       PORT: "3000"
-      APP_URL: http://community.example.localhost:8000
+      APP_URL: http://community.example.localhost:8001
       SITE_URL: http://www.example.localhost:8000
       COOKIE_DOMAIN: example.localhost
       # The cookie outlives the id_token so that an expired token can trigger the silent re-login.
       COOKIE_MAX_AGE_SECONDS: ${COOKIE_MAX_AGE_SECONDS:-43200}
-      ALLOWED_RETURN_HOSTS: www.example.localhost:8000,community.example.localhost:8000
+      ALLOWED_RETURN_HOSTS: www.example.localhost:8000,community.example.localhost:8001
       OIDC_ISSUER: http://auth.example.localhost:8080/realms/example
       OIDC_CLIENT_ID: community-app
       OIDC_CLIENT_SECRET: ${CLIENT_SECRET:-community-app-demo-secret}
-      AUTH_STATE_SECRET: ${AUTH_STATE_SECRET:-demo-auth-state-secret-please-change-0123456789}
+      APP_SECRET: ${APP_SECRET:-demo-community-app-secret-please-change-0123456789}
       DEBUG_CLAIMS: "1"
     # Inside the container, auth.example.localhost resolves to the Docker host, where Keycloak's
     # port 8080 is published. The service therefore uses the same IdP URL as the browser and
@@ -127,14 +130,13 @@ services:
       - ./varnish/default.vcl:/etc/varnish/default.vcl:ro
       - ./varnish/edge.vcl:/etc/varnish/edge.vcl:ro
 
-  # The edge: verifies the id_token cookie, sets X-Example-Role, routes by hostname.
+  # The edge in front of the website: verifies the id_token cookie, sets X-Example-Role.
   haproxy:
     image: haproxy:3.2
     ports:
       - "8000:8000"
     depends_on:
       - varnish
-      - auth
     volumes:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
       - ./haproxy/idp-public.pem:/usr/local/etc/haproxy/idp-public.pem:ro
