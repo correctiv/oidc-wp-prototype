@@ -201,6 +201,10 @@ Realm `example` with a fixed RSA signing key (so HAProxy can hold the matching p
 - **The domain cookie also reaches Keycloak.** `auth.example.localhost` is under `example.localhost`, so every request to Keycloak carries the login cookie. Keycloak ignores it, but it is a live illustration of the production question: which other subdomains receive this cookie?
 - **No `Secure`, no cookie prefixes locally.** Both require https. In production the community session should be `__Host-community_session` and the login cookie `__Secure-example_login`, both with `Secure`.
 
+## Design decisions
+
+The alternatives we tried or considered for each part, with their trade-offs, are in [docs/design-decisions.md](docs/design-decisions.md).
+
 ## Open points for production
 
 - **Zitadel instead of Keycloak.** Same flow. Zitadel's roles claim is a nested object under `urn:zitadel:iam:org:project:roles`, which HAProxy's JSON path handling will not read comfortably; a Zitadel Action that adds a flat `example_role` claim keeps the HAProxy rule a one-liner. Request only `openid` plus the roles scope. Every account must carry one of the known levels; the community app refuses logins without one.
