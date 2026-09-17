@@ -88,8 +88,8 @@ services:
       # No persistence: the realm is imported fresh on every start (dev mode, H2 inside the container).
       - ./keycloak:/opt/keycloak/data/import:ro
 
-  # Stand-in for the community app: the OIDC relying party. Sets the login cookie for the whole
-  # example.localhost domain and redirects back to wherever the user came from.
+  # Stand-in for the community app: the OIDC relying party. Keeps its own session and hands the
+  # id_token to the website's HAProxy (POST /auth/session), which sets the website's cookie.
   auth:
     build: ./auth
     command: ["node", "--watch", "src/index.js"]
@@ -101,9 +101,6 @@ services:
       PORT: "3000"
       APP_URL: http://community.example.localhost:8001
       SITE_URL: http://www.example.localhost:8000
-      COOKIE_DOMAIN: example.localhost
-      # The cookie outlives the id_token so that an expired token can trigger the silent re-login.
-      COOKIE_MAX_AGE_SECONDS: ${COOKIE_MAX_AGE_SECONDS:-43200}
       ALLOWED_RETURN_HOSTS: www.example.localhost:8000,community.example.localhost:8001
       OIDC_ISSUER: http://auth.example.localhost:8080/realms/example
       OIDC_CLIENT_ID: community-app
@@ -130,7 +127,8 @@ services:
       - ./varnish/default.vcl:/etc/varnish/default.vcl:ro
       - ./varnish/edge.vcl:/etc/varnish/edge.vcl:ro
 
-  # The edge in front of the website: verifies the id_token cookie, sets X-Example-Role.
+  # The edge in front of the website: owns the website's login cookie (set via POST /auth/session,
+  # cleared via /auth/clear), verifies it on every request, sets X-Example-Role.
   haproxy:
     image: haproxy:3.2
     ports:

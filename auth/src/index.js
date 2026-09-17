@@ -1,21 +1,19 @@
-// Stand-in for the community app: the OIDC relying party for the whole example.localhost domain.
+// Stand-in for the community app: the OIDC relying party for the community and the website.
 //
-// It logs users in at the IdP and stores the resulting id_token in a cookie scoped to the parent
-// domain, so the website (www.example.localhost, behind HAProxy) receives it too. HAProxy
-// verifies that cookie on every request and turns it into X-Example-Role; this app never has to.
+// It logs users in at the IdP, keeps its own host-only session, and hands the resulting id_token
+// to the website through an auto-submitting form POST to the website's /auth/session, where
+// HAProxy verifies it and sets the website's own host-only cookie. Cookies therefore never cross
+// hosts. HAProxy turns that cookie into X-Example-Role on every request; this app never has to.
 //
 //   /               tiny status page (what the real community app would be)
 //   /auth/login     start the login at the IdP, then return to ?return=
 //   /auth/refresh   silent re-login (prompt=none) after the id_token expired
-//   /auth/callback  exchange the code, set the cookies, redirect to the return URL
-//   /auth/logout    delete the cookies, RP-initiated logout at the IdP, return to ?return=
+//   /auth/callback  exchange the code, set the session, hand the token to the website
+//   /auth/logout    delete the session, RP-initiated logout at the IdP, clear the website's
+//                   cookie via its /auth/clear, return to ?return=
 //   /contact/me     JSON about the logged-in user, for the website's client-side call (CORS)
-//
-// Two cookies: example_session (Domain=example.localhost, the lean id_token, read by HAProxy) and
-// community_session (host-only, this app's own login with the profile from userinfo).
 
 import express from 'express';
-import { decodeJwt } from 'jose';
 import { createOidc } from './oidc.js';
 import { AUTH_COOKIE, COMMUNITY_COOKIE, createAuthState, createCommunitySession, parseCookies } from './state.js';
 
@@ -28,15 +26,12 @@ function env(name, fallback) {
   return value;
 }
 
-const LOGIN_COOKIE = 'example_session';
 // Every logged-in user has one of these; "none" is what the website uses for anonymous visitors.
 const LEVELS = ['limited', 'full'];
 
 const appUrl = env('APP_URL').replace(/\/+$/, '');
 const siteUrl = env('SITE_URL').replace(/\/+$/, '');
 const port = Number(env('PORT', '3000'));
-const cookieDomain = env('COOKIE_DOMAIN');
-const cookieMaxAgeSeconds = Number(env('COOKIE_MAX_AGE_SECONDS', '43200'));
 const secure = appUrl.startsWith('https://');
 
 const authState = createAuthState({
@@ -54,14 +49,30 @@ const oidc = createOidc({
   debugClaims: env('DEBUG_CLAIMS', '0') === '1',
 });
 
-// The login cookie is scoped to the parent domain on purpose: that is what lets the website see
-// it. Every other subdomain receives it as well, which is why it holds a lean id_token only.
-const loginCookie = { domain: cookieDomain, path: '/', httpOnly: true, sameSite: 'lax', secure };
-// The app's own cookies stay host-only; nobody but this app needs them.
+// This app's cookies are host-only; nobody but this app needs them.
 const stateCookie = { path: '/', httpOnly: true, sameSite: 'lax', secure };
 const sessionCookie = { path: '/', httpOnly: true, sameSite: 'lax', secure };
 
 const str = (v) => (typeof v === 'string' ? v : undefined);
+const escapeHtml = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+/** The website clears its own cookie and then continues to the return URL. */
+const siteClearUrl = (returnTo) => `${siteUrl}/auth/clear?return=${encodeURIComponent(returnTo)}`;
+
+/**
+ * Hands the id_token to the website: an auto-submitting form POST to the website's
+ * /auth/session, answered by HAProxy with the host-only cookie and a redirect to the return URL.
+ * A form POST keeps the token out of URLs, browser history and access logs.
+ */
+function handOverToSite(res, idToken, returnTo) {
+  res.type('html').send(`<!doctype html><title>Signing you in…</title>
+<form id="handover" method="post" action="${escapeHtml(siteUrl)}/auth/session">
+<input type="hidden" name="token" value="${escapeHtml(idToken)}">
+<input type="hidden" name="return" value="${escapeHtml(returnTo)}">
+<noscript><button>Continue</button></noscript>
+</form>
+<script>document.getElementById("handover").submit()</script>`);
+}
 
 const app = express();
 app.disable('x-powered-by');
@@ -93,18 +104,10 @@ app.get('/contact/me', async (req, res) => {
 });
 
 app.get('/', async (req, res) => {
-  const cookies = parseCookies(req.headers.cookie);
-  const session = await communitySession.verify(cookies[COMMUNITY_COOKIE]);
-  let status = session ? `Logged in as <strong>${session.username ?? session.sub}</strong> (role ${session.role}).` : 'You are not logged in.';
-  if (cookies[LOGIN_COOKIE]) {
-    try {
-      const claims = decodeJwt(cookies[LOGIN_COOKIE]);
-      const expired = typeof claims.exp === 'number' && claims.exp * 1000 < Date.now();
-      status += ` Domain cookie for ${cookieDomain}: ${expired ? 'expired' : 'valid'} id_token with claims ${Object.keys(claims).join(', ')}.`;
-    } catch {
-      status += ' Domain cookie present but not a JWT.';
-    }
-  }
+  const session = await communitySession.verify(parseCookies(req.headers.cookie)[COMMUNITY_COOKIE]);
+  const status = session
+    ? `Logged in as <strong>${escapeHtml(session.username ?? session.sub)}</strong> (access level ${escapeHtml(session.role)}). This host only holds the community session; the website has its own cookie.`
+    : 'You are not logged in.';
   const back = encodeURIComponent(`${appUrl}/`);
   res.type('html').send(`<!doctype html><title>Community app</title>
 <h1>Community app (stand-in)</h1>
@@ -134,10 +137,10 @@ app.get('/auth/callback', async (req, res) => {
   if (error) {
     // Typically login_required / interaction_required during a silent re-login when the IdP
     // session has expired. The user then falls back cleanly to "none" on the website.
-    res.clearCookie(LOGIN_COOKIE, loginCookie);
     res.clearCookie(COMMUNITY_COOKIE, sessionCookie);
     console.log(`[auth] IdP error: ${error} (silent=${state.silent})`);
-    if (state.silent) return res.redirect(302, state.returnTo);
+    // The website still holds the expired token; let it clear its cookie before continuing.
+    if (state.silent) return res.redirect(302, siteClearUrl(state.returnTo));
     return res.status(400).type('text/plain').send(`Login failed: ${error}`);
   }
 
@@ -148,33 +151,30 @@ app.get('/auth/callback', async (req, res) => {
       // The IdP is expected to assign a level to every account. Fail closed rather than log the
       // user in without one.
       console.error(`[auth] id_token without a valid access level (got ${JSON.stringify(role ?? null)})`);
-      res.clearCookie(LOGIN_COOKIE, loginCookie);
       res.clearCookie(COMMUNITY_COOKIE, sessionCookie);
-      if (state.silent) return res.redirect(302, state.returnTo);
+      if (state.silent) return res.redirect(302, siteClearUrl(state.returnTo));
       return res.status(403).type('text/plain').send('Your account has no access level assigned. Please contact support.');
     }
     const ttlSeconds = Math.max(1, claims.exp - Math.floor(Date.now() / 1000));
-    res.cookie(LOGIN_COOKIE, idToken, { ...loginCookie, maxAge: cookieMaxAgeSeconds * 1000 });
     const profile = { sub: claims.sub, username: userinfo.preferred_username, role };
     res.cookie(COMMUNITY_COOKIE, await communitySession.mint(profile, ttlSeconds), { ...sessionCookie, maxAge: ttlSeconds * 1000 });
-    console.log(`[auth] login successful, role=${role} silent=${state.silent}`);
-    return res.redirect(302, state.returnTo);
+    console.log(`[auth] login successful, role=${role} silent=${state.silent}, handing the token to the website`);
+    return handOverToSite(res, idToken, state.returnTo);
   } catch (err) {
     console.error(`[auth] callback failed: ${err.message}`);
-    res.clearCookie(LOGIN_COOKIE, loginCookie);
     res.clearCookie(COMMUNITY_COOKIE, sessionCookie);
-    if (state.silent) return res.redirect(302, state.returnTo);
+    if (state.silent) return res.redirect(302, siteClearUrl(state.returnTo));
     return res.status(502).type('text/plain').send('Login failed. See the community app log for details.');
   }
 });
 
 app.get('/auth/logout', async (req, res) => {
   const returnTo = new URL(authState.sanitiseReturn(str(req.query.return)), appUrl).toString();
-  res.clearCookie(LOGIN_COOKIE, loginCookie);
   res.clearCookie(COMMUNITY_COOKIE, sessionCookie);
   res.clearCookie(AUTH_COOKIE, stateCookie);
-  console.log(`[auth] logout, redirecting to the IdP, return=${returnTo}`);
-  res.redirect(302, await oidc.buildLogoutUrl(returnTo));
+  console.log(`[auth] logout, redirecting to the IdP, then clearing the website's cookie, return=${returnTo}`);
+  // IdP logout first, then the website clears its own cookie, then the user lands on the return URL.
+  res.redirect(302, await oidc.buildLogoutUrl(siteClearUrl(returnTo)));
 });
 
 // Express 5 forwards rejected promises here.
@@ -184,7 +184,7 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(port, () => {
-  console.log(`[auth] listening on :${port}, app=${appUrl}, cookie domain=${cookieDomain}`);
+  console.log(`[auth] listening on :${port}, app=${appUrl}, site=${siteUrl}`);
   // Warm up discovery; failures are logged only, the first request retries.
   oidc.configuration().catch((err) => console.warn(`[oidc] discovery not yet possible: ${err.message}`));
 });

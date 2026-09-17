@@ -8,18 +8,19 @@ Browser ──► www.example.localhost:8000        HAProxy ──► Varnish �
    └──────► auth.example.localhost:8080       Keycloak, realm "example" (stands in for the IdP)
 ```
 
-Three hostnames, one parent domain, three separate services. The community app is the OIDC relying party. After login it stores the IdP's `id_token` in a cookie scoped to `example.localhost`, so the website receives it too. HAProxy, which sits only in front of the website, verifies that cookie on every request with the IdP's public key, sets `X-Example-Role` and removes the cookie. Varnish caches per role. WordPress reads the header.
+Three hostnames, three separate services, no shared cookies. The community app is the OIDC relying party. After login it hands the IdP's `id_token` to the website with an auto-submitting form POST; HAProxy, which sits only in front of the website, verifies the token and sets the website's own host-only cookie. On every following request HAProxy verifies that cookie with the IdP's public key, sets `X-Example-Role` and removes the cookie. Varnish caches per role. WordPress reads the header.
 
 ## Core principles
 
 1. **WordPress is not an OIDC client.** The community app is the relying party and serves `/auth/*`. WordPress never sees a token or a user.
 2. **The cookie is the IdP's own `id_token`, and it is lean.** Only the `openid` scope plus the role claim are requested, so the token carries an opaque `sub`, the role and standard timestamps. No email, no name.
-3. **The edge trusts the IdP, not the community app.** HAProxy verifies the RS256 signature with the IdP's public key on disk and checks `iss`, `aud` and `exp`. The community app is a courier; it cannot invent roles.
-4. **Header hygiene in HAProxy.** `X-Example-Role` from the client is discarded, the login cookie is stripped before Varnish, and the role header is set from the verified token only. Anything that fails verification is `none`.
-5. **Varnish and WordPress are reachable only through HAProxy.** They live on the Docker network; in production a firewall or private network must guarantee the same, otherwise the header could be forged. The community app is its own public service.
-6. **Role in the cache hash, not in `Vary`.** Varnish adds the role in `vcl_hash`; static assets share one entry across roles.
-7. **Silent refresh.** When the `id_token` has expired, HAProxy redirects HTML navigations once to the community app's `prompt=none` re-login. If the IdP session is still alive the user notices nothing; otherwise they fall back cleanly to `none`.
-8. **Personal data only client-side.** The cached page never contains it. Pages for logged-in levels carry a small script that calls the community app's `/contact/me` from the browser; the cookies travel along because both hosts are the same site, and the community app answers with CORS headers for the website's origin only.
+3. **Every cookie is host-only.** The website's cookie is set by the website's own edge, the community app's cookies by the community app. Nothing is scoped to the parent domain, so no other subdomain ever receives a token.
+4. **The edge trusts the IdP, not the community app.** HAProxy verifies the RS256 signature with the IdP's public key on disk and checks `iss`, `aud` and `exp`, both when the cookie is set and on every request. The community app is a courier; it cannot invent roles.
+5. **Header hygiene in HAProxy.** `X-Example-Role` from the client is discarded, the login cookie is stripped before Varnish, and the role header is set from the verified token only. Anything that fails verification is `none`.
+6. **Varnish and WordPress are reachable only through HAProxy.** They live on the Docker network; in production a firewall or private network must guarantee the same, otherwise the header could be forged. The community app is its own public service.
+7. **Role in the cache hash, not in `Vary`.** Varnish adds the role in `vcl_hash`; static assets share one entry across roles.
+8. **Silent refresh.** When the `id_token` has expired, HAProxy redirects HTML navigations once to the community app's `prompt=none` re-login. If the IdP session is still alive the fresh token comes back through the same hand-over and the user notices nothing; otherwise the community app sends the browser to the website's `/auth/clear` and they fall back cleanly to `none`.
+9. **Personal data only client-side.** The cached page never contains it. Pages for logged-in levels carry a small script that calls the community app's `/contact/me` from the browser; the cookies travel along because both hosts are the same site, and the community app answers with CORS headers for the website's origin only.
 
 ## Getting started
 
@@ -38,7 +39,7 @@ docker compose logs -f wp-init keycloak   # wait for "[wp-init] done" and "Keycl
 | Keycloak admin | http://auth.example.localhost:8080/admin/ | `admin` / `admin` |
 | WordPress admin (through the same chain) | http://www.example.localhost:8000/wp-admin/ | `admin` / `admin` |
 
-Chrome, Firefox and Linux with systemd-resolved resolve `*.localhost` at any depth to 127.0.0.1 on their own. If your browser does not, add `127.0.0.1 www.example.localhost community.example.localhost auth.example.localhost` to `/etc/hosts`. Browsers accept a cookie with `Domain=example.localhost` because `example.localhost` is a registrable domain; a bare `Domain=localhost` would be rejected, which is why the hostnames have three labels.
+Chrome, Firefox and Linux with systemd-resolved resolve `*.localhost` at any depth to 127.0.0.1 on their own. If your browser does not, add `127.0.0.1 www.example.localhost community.example.localhost auth.example.localhost` to `/etc/hosts`.
 
 ### Demo users (password is `password` for all)
 
@@ -53,9 +54,9 @@ Every account has a level; the community app refuses a login whose token carries
 
 1. Open http://www.example.localhost:8000. The badge shows `none`, the login hint is visible.
 2. "Log in now" → community app → Keycloak login page → log in as `anna` → back on the website with level `full`.
-3. DevTools → Application → Cookies: `example_session` with domain `example.localhost`. Decode the payload: `sub`, `example_role`, timestamps, nothing else.
-4. Network tab: `X-Cache: HIT` on reload, `X-Cache-Key: full|www.example.localhost:8000|/`. The request to the website carried the cookie; WordPress never saw it.
-5. Open http://community.example.localhost:8001: the same cookie is visible there, which is the point of the shared domain.
+3. DevTools → Application → Cookies: `example_session` on `www.example.localhost` only, host-only. Decode the payload: `sub`, `example_role`, timestamps, nothing else. The Network tab shows how it got there: the community app's callback answered with a form that posted the token to `www…/auth/session`, and HAProxy replied with the cookie and a redirect.
+4. Network tab on reload: `X-Cache: HIT`, `X-Cache-Key: full|www.example.localhost:8000|/`. The request carried the cookie; WordPress never saw it.
+5. Open http://community.example.localhost:8001: it has its own `community_session` cookie and nothing else. No cookie is shared between the hosts.
 6. The green box "Logged in at the community as anna …" was filled by your browser: Network tab → `contact/me`, a request to `community.example.localhost:8001` with the cookies attached and `Access-Control-Allow-Origin` in the response. View the page source: the box is an empty placeholder and no name appears anywhere.
 7. "Log out" → Keycloak confirmation → back with `none`. Log in as `ben` to see the `limited` variant.
 
@@ -88,9 +89,13 @@ sequenceDiagram
     K->>B: 302 → community…/auth/callback?code&state
     B->>C: GET /auth/callback
     C->>K: POST /token (code, verifier, client_secret) [back channel]
-    K->>C: id_token (sub, example_role, timestamps)
-    C->>B: 302 → http://www…/members/<br/>Set-Cookie example_session = id_token, Domain=example.localhost
-    Note over H,W: HAProxy, Varnish and WordPress were not involved in any step.
+    K->>C: id_token + access_token
+    C->>K: GET /userinfo → username, kept in community_session (host-only)
+    C->>B: 200 auto-submitting form: POST www…/auth/session (token, return)
+    B->>H: POST /auth/session (Origin: community…)
+    H->>H: verify token (signature, iss, aud, exp), check Origin and return URL
+    H->>B: 302 → http://www…/members/<br/>Set-Cookie example_session = id_token (host-only)
+    Note over W: Varnish and WordPress were not involved in any step.
 ```
 
 ### Cached request
@@ -144,10 +149,12 @@ sequenceDiagram
     C->>B: 302 → Keycloak /auth … prompt=none
     alt IdP session alive
         K->>B: 302 → /auth/callback?code
-        C->>B: fresh id_token in the cookie, 302 → http://www…/
+        C->>B: hand-over form → POST www…/auth/session
+        H->>B: fresh cookie, 302 → http://www…/
     else IdP session expired
         K->>B: 302 → /auth/callback?error=login_required
-        C->>B: delete the cookie, 302 → http://www…/ (role none, no further redirect)
+        C->>B: 302 → www…/auth/clear?return=http://www…/
+        H->>B: Set-Cookie Max-Age=0, 302 → http://www…/ (role none, no further redirect)
     end
 ```
 
@@ -157,8 +164,11 @@ sequenceDiagram
 
 | Step | Behaviour |
 | --- | --- |
-| Token check | `req.cook(example_session)` → `jwt_header_query` pins `RS256`, `jwt_verify` with `idp-public.pem`, `jwt_payload_query` checks `iss` and `aud` and reads `exp` and `example_role`. Missing, tampered, wrong issuer or audience → `none`. |
-| Expiry | `exp` compared with `date()`. Expired but otherwise valid token on a `GET` with `Accept: text/html` → 302 to the community app's `/auth/refresh` with the current URL as `return`. The community app's URL is the one literal in the config that has to match the environment. |
+| Cookie hand-over | `POST /auth/session` with `token` and `return` in the form body. Accepted only with the community app's `Origin` (browsers always send it on cross-origin form posts, which shuts out login CSRF) and only if the token passes the same checks as below. Answer: 302 to the return URL with the host-only cookie, `Max-Age` 12 h. Anything else on that path is 400 or 403. |
+| Cookie clear | `GET /auth/clear?return=…`: 302 to the return URL with `Max-Age=0`. Used by the community app after logout and after a failed silent refresh. |
+| Return URLs | Both endpoints accept a path on this site or an absolute URL on one of the two known hosts; everything else, including `//host`, becomes `/`. |
+| Token check | `req.cook(example_session)` (or the form field on the hand-over) → `jwt_header_query` pins `RS256`, `jwt_verify` with `idp-public.pem`, `jwt_payload_query` checks `iss` and `aud` and reads `exp` and `example_role`. Missing, tampered, wrong issuer or audience → `none`. |
+| Expiry | `exp` compared with `date()`. Expired but otherwise valid token on a `GET` with `Accept: text/html` → 302 to the community app's `/auth/refresh` with the current URL as `return`. The community app's URL and origin are the literals in the config that have to match the environment. |
 | Hygiene | `X-Example-Role` from the client is deleted; the login cookie is removed from the `Cookie` header (other cookies pass); the header is set from the verified role only. |
 | Key material | The IdP's public key as a PEM file. Zitadel and Keycloak rotate signing keys, so production needs a small job that fetches the JWKS, writes the PEM and reloads HAProxy. `scripts/generate-idp-key.sh` produces the demo pair. |
 
@@ -170,7 +180,7 @@ Trusts `X-Example-Role` because only HAProxy can reach it; normalises anything b
 
 Express 5 with `openid-client` and `jose`, three files. `index.js` reads the environment and holds a tiny status page, the four routes `/auth/login`, `/auth/refresh` (same, with `prompt=none`), `/auth/callback`, `/auth/logout`, and `/contact/me`. `oidc.js` wraps `openid-client` (lazy discovery, retried while Keycloak is still starting) and fetches the profile from the userinfo endpoint at login. `state.js` signs the app's two host-only cookies: `example_auth` (state, nonce, PKCE verifier and return URL during the redirect) and `community_session` (the app's own login with `sub`, username and role, living as long as the `id_token`). It also validates return URLs against an allowlist of hosts.
 
-Two cookies with two jobs: `example_session` is the lean `id_token` for the whole domain, read by HAProxy. `community_session` is host-only and holds the profile; `/contact/me` answers from it and sends CORS headers only for the website's origin. The username reaches the community app through userinfo, never through the `id_token`, so it never ends up in the domain cookie. It runs as its own service on port 8001, not behind HAProxy, as the real community app does. The real app would replace all of this with its existing login, keeping only two obligations: set the `id_token` cookie with `Domain=example.localhost`, and accept a `return` parameter on login and logout.
+Two cookies on two hosts: `example_session` on the website is the lean `id_token`, set and read by HAProxy. `community_session` on the community host holds the profile; `/contact/me` answers from it and sends CORS headers only for the website's origin. The username reaches the community app through userinfo, never through the `id_token`, so it never ends up in the website's cookie. It runs as its own service on port 8001, not behind HAProxy, as the real community app does. The real app would replace all of this with its existing login, keeping three obligations: after login, answer with the auto-submitting form that posts the `id_token` and the return URL to the website's `/auth/session`; after logout and after a failed silent refresh, send the browser through the website's `/auth/clear`; and accept a `return` parameter on login and logout.
 
 ### WordPress (`wordpress/plugins/example-role/`)
 
@@ -192,19 +202,19 @@ Realm `example` with a fixed RSA signing key (so HAProxy can hold the matching p
 ## Pitfalls of the local environment
 
 - **Keycloak sets `Secure` cookies on `*.localhost`**, because like browsers it treats `*.localhost` as a secure context. Chrome and Firefox accept that over http, `curl` does not. That is why `scripts/login-flow.mjs` plays the browser for the automated flows.
-- **The domain cookie also reaches Keycloak.** `auth.example.localhost` is under `example.localhost`, so every request to Keycloak carries the `id_token` cookie. Keycloak ignores it, but it illustrates the production question: which other subdomains would receive this cookie?
 - **One hostname for Keycloak, also inside Docker.** `openid-client` checks during discovery that the issuer matches the URL it was fetched from, so the community app container must reach Keycloak under the browser's URL. `extra_hosts: auth.example.localhost:host-gateway` maps that name to the Docker host.
 - **Keycloak without persistence.** The realm is imported fresh on every start. Changes made in the admin UI are lost on restart; permanent changes belong in `keycloak/realm-example.json`. The demo signing key is committed on purpose; it signs nothing but demo logins.
 - **Logout shows a confirmation page**, because the community app does not send an `id_token_hint`.
-- The login cookie lives longer (12 h) than the `id_token` (15 min). Only then can an expired token trigger the silent refresh.
+- The website's cookie lives longer (12 h) than the `id_token` (15 min). Only then can an expired token trigger the silent refresh.
+- **No `Secure`, no `__Host-` prefix locally.** Both require https. In production the cookie should be `__Host-example_session` with `Secure`, which additionally guarantees that no subdomain can set or shadow it.
 
 ## Open points for production
 
 - **Zitadel instead of Keycloak.** Same flow. Zitadel's roles claim is a nested object under `urn:zitadel:iam:org:project:roles`, which HAProxy's JSON path handling will not read comfortably; a Zitadel Action that adds a flat `example_role` claim keeps the HAProxy rule a one-liner. Request only `openid` plus the roles scope. Every account must carry one of the known levels; the community app refuses logins without one.
 - **Key rotation.** HAProxy needs the IdP's public key as a file. A small job fetching the JWKS, converting to PEM and reloading HAProxy, with the old key kept during the grace period.
-- **Subdomain inventory.** The domain cookie is sent to every subdomain of the parent domain, including anything CNAMEd to a third party. Keep the token lean and know the list.
-- **Cookie attributes.** `Secure`, `HttpOnly`, `SameSite=Lax` (or `Strict`, everything is one site), `__Secure-` prefix. `__Host-` is impossible with a `Domain`. Deleting on logout must use the same `Domain`.
-- **Client-side calls and CORS.** `/contact/me` works because the two hosts are the same site; the browser sends `SameSite=Lax` cookies with the fetch. The community app must echo the website's exact origin, never `*`, together with `Access-Control-Allow-Credentials`. Anything under `/contact/*` is personal and must stay `no-store`.
+- **Cookie attributes.** `__Host-` prefix, `Secure`, `HttpOnly`, `SameSite=Lax` (or `Strict`, everything is one site). Host-only cookies mean the website must live on one canonical host; on an apex domain, `www.` would not receive it.
+- **Hand-over hardening.** The `Origin` check is what stops a third party from logging a victim into an attacker's account. Keep it, and consider a short-lived one-time nonce issued by HAProxy if you want belt and braces.
+- **Client-side calls and CORS.** `/contact/me` works because the two hosts are the same site; the browser sends the community app's `SameSite=Lax` cookie with the fetch. The community app must echo the website's exact origin, never `*`, together with `Access-Control-Allow-Credentials`. Anything under `/contact/*` is personal and must stay `no-store`.
 - **Session length and revocation.** A role change takes effect when the `id_token` expires or the user visits the community app again. Pick the lifetime accordingly, or have the community app refresh the cookie from its own refresh token.
 - **Community app availability.** Website login depends on it. Cached pages keep serving the anonymous variant if it is down. HAProxy's refresh redirect also points at it, so its public URL is configuration on the website's edge.
 - **Rate limiting** on `/auth/*`, e.g. `stick-table` and `http-request track-sc0` in HAProxy.
@@ -218,7 +228,7 @@ Realm `example` with a fixed RSA signing key (so HAProxy can hold the matching p
 ```
 docker-compose.yml           stack: db, wordpress, wp-init, keycloak, auth, varnish, haproxy
 .env.example                 secrets and TTLs (defaults also in compose)
-haproxy/haproxy.cfg          id_token verification, X-Example-Role, cookie stripping, refresh redirect
+haproxy/haproxy.cfg          /auth/session and /auth/clear, id_token verification, X-Example-Role, cookie stripping, refresh redirect
 haproxy/idp-public.pem       the IdP's public key (demo pair, see scripts/generate-idp-key.sh)
 keycloak/realm-example.json  realm with fixed signing key, client community-app, role mapper, demo users
 varnish/default.vcl          backend wiring
