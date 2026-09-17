@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// Plays the browser: login via the community app (including the form hand-over to the website),
-// logout, silent refresh, and what the website makes of its cookie. No dependencies, Node >= 22.
+// Plays the browser: login via the community app, logout, silent refresh, and what the website
+// makes of the resulting cookie. No dependencies, Node >= 22 only.
 //
 //   node scripts/login-flow.mjs login anna                 # expects role full on the website
 //   node scripts/login-flow.mjs login ben                  # expects role limited
 //   node scripts/login-flow.mjs logout anna                # login, then logout via the community app -> none
-//   node scripts/login-flow.mjs refresh anna --wait 7      # login, let the id_token expire -> silent re-login keeps the role
+//   node scripts/login-flow.mjs refresh anna --wait 7     # login, let the id_token expire -> silent re-login keeps the role
 //   node scripts/login-flow.mjs refresh-fail anna --wait 7 # login, end the IdP session, let the token expire -> none
 //
 // The refresh scenarios need a short id_token lifetime (accessTokenLifespan in the realm);
@@ -31,14 +31,15 @@ if (!scenario || !user) {
   process.exit(2);
 }
 
-// --- Minimal cookie jar with Domain support. Path and Secure are ignored on purpose. ---
-// key: domain -> Map(name -> {value, hostOnly})
+// --- Minimal cookie jar with Domain and expiry support. Path and Secure are ignored on purpose. ---
+// key: domain -> Map(name -> {value, hostOnly, expiresAt})
 const jar = new Map();
 const domainMatches = (host, domain, hostOnly) => (hostOnly ? host === domain : host === domain || host.endsWith(`.${domain}`));
+const alive = (c) => c.expiresAt > Date.now();
 function cookieHeader(url) {
   const pairs = [];
   for (const [domain, cookies] of jar) {
-    for (const [name, c] of cookies) if (domainMatches(url.hostname, domain, c.hostOnly)) pairs.push(`${name}=${c.value}`);
+    for (const [name, c] of cookies) if (alive(c) && domainMatches(url.hostname, domain, c.hostOnly)) pairs.push(`${name}=${c.value}`);
   }
   return pairs.length ? pairs.join('; ') : undefined;
 }
@@ -52,16 +53,16 @@ function storeCookies(url, res) {
     const domainAttr = lower.find((a) => a.toLowerCase().startsWith('domain='))?.slice(7).replace(/^\./, '').toLowerCase();
     const maxAge = lower.find((a) => a.toLowerCase().startsWith('max-age='))?.slice(8);
     const expires = lower.find((a) => a.toLowerCase().startsWith('expires='))?.slice(8);
-    const expired = (maxAge !== undefined && Number(maxAge) <= 0) || (expires && new Date(expires).getTime() <= Date.now());
+    const expiresAt = maxAge !== undefined ? Date.now() + Number(maxAge) * 1000 : expires ? new Date(expires).getTime() : Infinity;
     const domain = domainAttr || url.hostname;
     if (!jar.has(domain)) jar.set(domain, new Map());
-    if (value === '' || expired) jar.get(domain).delete(name);
-    else jar.get(domain).set(name, { value, hostOnly: !domainAttr });
+    if (value === '' || expiresAt <= Date.now()) jar.get(domain).delete(name);
+    else jar.get(domain).set(name, { value, hostOnly: !domainAttr, expiresAt });
   }
 }
 const cookieNames = (host) => {
   const names = [];
-  for (const [domain, cookies] of jar) for (const [name, c] of cookies) if (domainMatches(host, domain, c.hostOnly)) names.push(`${name}${c.hostOnly ? '' : ` (Domain=${domain})`}`);
+  for (const [domain, cookies] of jar) for (const [name, c] of cookies) if (alive(c) && domainMatches(host, domain, c.hostOnly)) names.push(`${name}${c.hostOnly ? '' : ` (Domain=${domain})`}`);
   return names.join(', ') || '(none)';
 };
 
@@ -87,15 +88,7 @@ async function follow(url, opts, maxHops = 12) {
     current = next;
     res = await request(next);
   }
-  const html = await res.text();
-  // The community app hands the token to the website with an auto-submitting form; a browser
-  // submits it with an Origin header, so do we.
-  if (html.includes('id="handover"')) {
-    const action = formAction(html, 'handover', current);
-    step(`  ✎ auto-submitting the hand-over form to ${short(action)} (Origin: ${current.origin})`);
-    return follow(action, { method: 'POST', body: hiddenInputs(html), headers: { 'content-type': 'application/x-www-form-urlencoded', origin: current.origin } }, maxHops - hops);
-  }
-  return { res, url: current, html };
+  return { res, url: current, html: await res.text() };
 }
 
 function short(u) {
@@ -143,11 +136,11 @@ async function login() {
   if (done.url.toString() !== returnTo) throw new Error(`login did not end on ${returnTo} but on ${done.url} (HTTP ${done.res.status})`);
   step(`  ✓ back on ${short(done.url)} with role ${done.res.headers.get('x-example-role')}`);
   const siteHost = new URL(SITE).hostname;
-  const cookie = jar.get(siteHost)?.get('example_session');
-  if (!cookie) throw new Error('no example_session cookie on the website host');
-  if (!cookie.hostOnly) throw new Error('example_session is not host-only');
-  const claims = JSON.parse(Buffer.from(cookie.value.split('.')[1], 'base64url').toString());
-  step(`  ✓ host-only id_token cookie on ${siteHost} carries: ${Object.keys(claims).join(', ')}  (role=${claims.example_role ?? 'none'})`);
+  const login = [...jar].flatMap(([d, c]) => [...c].filter(([n, v]) => n === 'example_login' && alive(v) && domainMatches(siteHost, d, v.hostOnly)).map(([, v]) => v))[0];
+  if (!login) throw new Error('no example_login cookie visible to the website');
+  if (login.hostOnly) throw new Error('example_login is not a domain cookie');
+  const claims = JSON.parse(Buffer.from(login.value.split('.')[1], 'base64url').toString());
+  step(`  ✓ domain-wide id_token cookie carries: ${Object.keys(claims).join(', ')}  (role=${claims.example_role ?? 'none'})`);
   step(`  ✓ cookies sent to ${siteHost}: ${cookieNames(siteHost)}`);
   step(`  ✓ cookies sent to ${new URL(COMMUNITY).hostname}: ${cookieNames(new URL(COMMUNITY).hostname)}`);
   step(`  ✓ cookies sent to ${new URL(IDP).hostname}: ${cookieNames(new URL(IDP).hostname)}`);

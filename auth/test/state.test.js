@@ -43,7 +43,7 @@ test('safeReturnUrl: allowlisted absolute URLs and relative paths only', () => {
 });
 
 test('parseCookies: parses a Cookie header', () => {
-  assert.deepEqual(parseCookies('a=1; example_session=x.y.z; b=2'), { a: '1', example_session: 'x.y.z', b: '2' });
+  assert.deepEqual(parseCookies('a=1; example_login=x.y.z; b=2'), { a: '1', example_login: 'x.y.z', b: '2' });
   assert.deepEqual(parseCookies(undefined), {});
 });
 
