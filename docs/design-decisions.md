@@ -9,8 +9,9 @@ The constraints that drove every decision:
 
 - WordPress must store no user data and must not know who the user is, only an access level.
 - The site must stay fully cacheable: one cached variant per access level, never per person.
-- Production runs HAProxy in front of Varnish; the identity provider is Zitadel; a separate
-  community app on a sibling subdomain is already an OIDC relying party and must share the login.
+- The environment it is designed for has a reverse proxy in front of the page cache (HAProxy and
+  Varnish), an OIDC identity provider, and a separate community app on a sibling subdomain that is
+  already an OIDC relying party and must share the login.
 
 ## 1. Where the per-request logic runs
 
@@ -19,8 +20,8 @@ cache per role.
 
 | Option | For | Against | Outcome |
 | --- | --- | --- | --- |
-| **Node reverse proxy** (Hono, then Express) with an in-memory cache | Everything in one small, readable codebase; easy to demo; no platform dependency | Not what production runs; a hand-written cache is a toy; one more service in the request path | Used for the first version (`a174a15`), replaced |
-| **Varnish VCL** with `vmod_digest` for the HMAC check | Production already runs Varnish; the cache is real; VCL is what ops can read | `vmod_digest` had to be compiled into the image and its base64 helpers turned out unreliable; JWT parsing in VCL is regex work; the HMAC key ends up in VCL on every node | Used (`9eee39b`), replaced when HAProxy turned out to be in front |
+| **Node reverse proxy** (Hono, then Express) with an in-memory cache | Everything in one small, readable codebase; easy to demo; no platform dependency | Not a real cache; one more service in the request path; does not resemble the target environment | Used for the first version (`a174a15`), replaced |
+| **Varnish VCL** with `vmod_digest` for the HMAC check | The target environment already has Varnish; the cache is real; VCL is what operators can read | `vmod_digest` had to be compiled into the image and its base64 helpers turned out unreliable; JWT parsing in VCL is regex work; the HMAC key ends up in VCL on every node | Used (`9eee39b`), replaced when HAProxy turned out to be in front |
 | **HAProxy** with `jwt_verify` | Native JWT verification including RS256 with the IdP's public key, so no shared secret; HAProxy is already the first hop; Varnish shrinks to hashing on a header | Public key must be kept in sync with the IdP's rotation; JSON path handling is limited (flat claims only) | **Chosen** (`8c8b3a3` onwards) |
 
 ## 2. What is in the cookie
@@ -28,16 +29,16 @@ cache per role.
 | Option | For | Against | Outcome |
 | --- | --- | --- | --- |
 | **Own minted JWT** with only `role` and `exp` (HS256) | Smallest possible cookie; no `sub` anywhere in the browser; lifetime under our control | The edge has to trust the minting service and share a secret with it; a compromised minting service can invent roles; one more token format to explain | Used in the first two versions, dropped |
-| **The IdP's `id_token`** as issued | The edge trusts only the IdP's signature; the relying party is a courier that cannot forge anything; one token format; Zitadel's key rotation is the only key management | Contains an opaque `sub` and standard claims; lifetime is the IdP's token lifetime; slightly larger cookie | **Chosen** (`8c8b3a3` onwards). Requires the IdP to issue a lean token: `openid` scope plus the role claim only |
+| **The IdP's `id_token`** as issued | The edge trusts only the IdP's signature; the relying party is a courier that cannot forge anything; one token format; the IdP's key rotation is the only key management | Contains an opaque `sub` and standard claims; lifetime is the IdP's token lifetime; slightly larger cookie | **Chosen** (`8c8b3a3` onwards). Requires the IdP to issue a lean token: `openid` scope plus the role claim only |
 
 ## 3. Who is the OIDC relying party
 
 | Option | For | Against | Outcome |
 | --- | --- | --- | --- |
-| **A dedicated mini app** behind the edge | Small (about 150 lines with `openid-client`); independent of other systems; easy to reason about | One more deployable for the infrastructure team; duplicates a login that the community app already has | Used until `60891e7`, replaced |
+| **A dedicated mini app** behind the edge | Small (about 150 lines with `openid-client`); independent of other systems; easy to reason about | One more deployable to run; duplicates a login that the community app already has | Used until `60891e7`, replaced |
 | **HAProxy itself** | No extra deployable | Impossible with configuration alone: the code exchange is an outbound HTTP call. Feasible in Lua with HAProxy's HTTP client, but that means a hand-written OIDC client without a maintained library, JSON parsing in Lua, and login logic owned by the edge team | Considered, rejected |
 | **The IdP directly** | Nothing to run | An identity provider cannot set cookies for another domain or receive its own callback; every OIDC web login needs a relying party on the site's side | Considered, not possible |
-| **oauth2-proxy** or similar | Off the shelf, supports Zitadel | Its cookie is an encrypted blob HAProxy cannot read, so every request would have to pass through it; it is built to require login, whereas anonymous visitors are a first-class role here | Considered, rejected |
+| **oauth2-proxy** or similar | Off the shelf, works with most identity providers | Its cookie is an encrypted blob HAProxy cannot read, so every request would have to pass through it; it is built to require login, whereas anonymous visitors are a first-class role here | Considered, rejected |
 | **The community app** as the single relying party for both hosts | Already exists and already logs users in; no second client, no second login UI; single sign-on comes for free | Website login depends on the community app being up; the community app has to know how to hand the login to the website (see 4) | **Chosen** (`8c8b3a3` onwards) |
 | **Two relying parties**, one per host, with SSO through the IdP session | Textbook OIDC; nothing crosses a host boundary; each host owns its cookie | Two clients to maintain; sessions on the two hosts drift apart; the website's client-side call to the community API needs a community session, which a website-only login does not create (see 5) | Considered late, rejected because of 5 |
 
@@ -61,7 +62,7 @@ their name from the community app.
 | Option | For | Against | Outcome |
 | --- | --- | --- | --- |
 | **Client-side call** from the page to the community app's `/contact/me`, cookies sent because the hosts are the same site, CORS for the website's origin only | The cached page stays anonymous; the community app owns its API and its session; standard browser mechanics | Needs a community session in the browser, so the login must be shared (see 4); CORS must be exact, never `*` | **Chosen** (`0d29fc8` onwards) |
-| **Proxy the API through the website's edge** with the verified token as a bearer header | No CORS, no second cookie; one session drives everything | Routes the community API through HAProxy, which the infrastructure team does not do today; felt like working around CORS rather than using it | Considered, rejected |
+| **Proxy the API through the website's edge** with the verified token as a bearer header | No CORS, no second cookie; one session drives everything | Puts the community API behind the website's edge, a new network path; felt like working around CORS rather than using it | Considered, rejected |
 | **Chain the logins**: after the website login, redirect once through the community login silently | Keeps two independent relying parties | Two sessions that expire independently; the profile box goes blank when the community session lapses first | Considered, rejected |
 
 ## 6. Protecting the origin
@@ -84,9 +85,10 @@ their name from the community app.
 - **Every logged-in user has a level.** An early version had a demo user who was logged in with
   level `none`. That state does not exist in the real use case and complicated the page logic
   (which links to show). Removed; the community app refuses a login whose token has no valid level.
-- **Keycloak stands in for Zitadel** in the prototype: realistic, role claim via a mapper, fixed
-  signing key so HAProxy can hold the public key. A mock IdP or `dex` would have been lighter but
-  less convincing. For Zitadel, a flat role claim via an Action is the one thing to add.
+- **Keycloak stands in for the identity provider** in the prototype: realistic, role claim via a
+  mapper, fixed signing key so HAProxy can hold the public key. A mock IdP or `dex` would have been
+  lighter but less convincing. Any provider that can issue a flat role claim works; with Zitadel,
+  for example, that is an Action.
 - **Hostnames have three labels** (`www.example.localhost`) so that a domain cookie can be
   demonstrated locally; browsers reject `Domain=localhost`.
 - **Keycloak's `Secure` cookies on `*.localhost`** are accepted by browsers but not by `curl`,

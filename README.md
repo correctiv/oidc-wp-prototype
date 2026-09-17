@@ -162,7 +162,7 @@ sequenceDiagram
 | Token check | `req.cook(example_login)` → `jwt_header_query` pins `RS256`, `jwt_verify` with `idp-public.pem`, `jwt_payload_query` checks `iss` and `aud` and reads `exp` and `example_role`. Missing, tampered, wrong issuer or audience → `none`. |
 | Expiry | `exp` compared with `date()`. Expired but otherwise valid token on a `GET` with `Accept: text/html` → 302 to the community app's `/auth/refresh` with the current URL as `return`. The community app's URL and origin are the literals in the config that have to match the environment. |
 | Hygiene | `X-Example-Role` from the client is deleted; the login cookie is removed from the `Cookie` header (other cookies pass); the header is set from the verified role only. |
-| Key material | The IdP's public key as a PEM file. Zitadel and Keycloak rotate signing keys, so production needs a small job that fetches the JWKS, writes the PEM and reloads HAProxy. `scripts/generate-idp-key.sh` produces the demo pair. |
+| Key material | The IdP's public key as a PEM file. Identity providers rotate signing keys, so a real deployment needs a small job that fetches the JWKS, writes the PEM and reloads HAProxy. `scripts/generate-idp-key.sh` produces the demo pair. |
 
 ### Varnish (`varnish/edge.vcl`)
 
@@ -203,11 +203,15 @@ Realm `example` with a fixed RSA signing key (so HAProxy can hold the matching p
 
 ## Design decisions
 
-The alternatives we tried or considered for each part, with their trade-offs, are in [docs/design-decisions.md](docs/design-decisions.md).
+The alternatives tried or considered for each part, with their trade-offs, are in [docs/design-decisions.md](docs/design-decisions.md).
+
+## Licence
+
+MIT, see [LICENSE](LICENSE). The demo secrets, passwords and the signing key in this repository protect nothing but the local demo; never reuse them.
 
 ## Open points for production
 
-- **Zitadel instead of Keycloak.** Same flow. Zitadel's roles claim is a nested object under `urn:zitadel:iam:org:project:roles`, which HAProxy's JSON path handling will not read comfortably; a Zitadel Action that adds a flat `example_role` claim keeps the HAProxy rule a one-liner. Request only `openid` plus the roles scope. Every account must carry one of the known levels; the community app refuses logins without one.
+- **A different identity provider.** Same flow with any OIDC provider that can put a flat role claim into the `id_token`. With Zitadel, for example, the roles claim is a nested object under `urn:zitadel:iam:org:project:roles`, which HAProxy's JSON path handling will not read comfortably; an Action that adds a flat `example_role` claim keeps the HAProxy rule a one-liner. Request only `openid` plus the roles scope. Every account must carry one of the known levels; the community app refuses logins without one.
 - **Key rotation.** HAProxy needs the IdP's public key as a file. A small job fetching the JWKS, converting to PEM and reloading HAProxy, with the old key kept during the grace period.
 - **Subdomain inventory.** The login cookie is sent to every subdomain of the parent domain, including anything CNAMEd to a third party. Know the list. What such a host gets is bounded: an opaque `sub`, the level, and read access to the website's gated content as that user for at most one token lifetime.
 - **Cookie attributes.** Login cookie: `__Secure-` prefix, `Secure`, `HttpOnly`, `SameSite=Lax` (or `Strict`, everything is one site), `Domain` set to the parent domain; deleting on logout must use the same `Domain`. Community session: `__Host-` prefix, so no subdomain can set or shadow it.
