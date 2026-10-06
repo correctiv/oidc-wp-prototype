@@ -65,14 +65,35 @@ their name from the community app.
 | **Proxy the API through the website's edge** with the verified token as a bearer header | No CORS, no second cookie; one session drives everything | Puts the community API behind the website's edge, a new network path; felt like working around CORS rather than using it | Considered, rejected |
 | **Chain the logins**: after the website login, redirect once through the community login silently | Keeps two independent relying parties | Two sessions that expire independently; the profile box goes blank when the community session lapses first | Considered, rejected |
 
-## 6. Protecting the origin
+## 6. Hiding the cookie's content from other subdomains
+
+The domain-wide login cookie reaches every host under the parent domain. A review asked whether
+the level could be made unreadable for them.
+
+| Option | For | Against | Outcome |
+| --- | --- | --- | --- |
+| **Leave the `id_token` readable** | Nothing to build | Any subdomain can read the level and the opaque `sub`; both are pseudonymous personal data | Used until `25efe7c`, replaced |
+| **Encrypt only the role claim at the IdP** (Action, AES-GCM with a fresh nonce) | Trust stays with the IdP; HAProxy only adds a decrypt step for one claim | Needs IdP-side code with access to a key, in Zitadel a webhook target; `sub` and timestamps stay readable | Considered |
+| **Store the level pre-encrypted as a user attribute** | No change to token issuance; the system that assigns the level encrypts it | Nonce per user rather than per token; `sub` stays readable; ties the IdP's data model to a key | Considered |
+| **Let the community app mint a fully encrypted token of its own** | Nothing readable at all; no IdP change | HAProxy would trust a key the community app holds; whoever has it can forge roles, and the key must stay secret in two places | Considered, rejected |
+| **Encrypt the IdP's signed `id_token`** in the community app (AES-256-GCM, fresh nonce), decrypt in HAProxy, then verify the signature as before | Nothing readable at all, not even `sub`; the trust anchor stays the IdP, because the shared key only protects confidentiality and forging still needs the IdP's signature; one line in the community app, a few in HAProxy; no IdP change | A symmetric key in two places that has to be rotated; a slightly larger cookie | **Chosen** |
+
+A deterministic scheme, the same ciphertext for the same level, would not help: with three possible
+values a third party only needs a test account per level to recognise them. The nonce per token is
+what makes the cookie unguessable.
+
+Encryption stops passive reading, for example in a third party's access logs. It does not stop a
+host that receives the cookie from replaying it against the website; the subdomain inventory
+remains the answer to that.
+
+## 7. Protecting the origin
 
 | Option | For | Against | Outcome |
 | --- | --- | --- | --- |
 | **Shared secret header** checked by a WordPress mu-plugin | Defence in depth even if the network is misconfigured; visible in a demo | One more secret in three places; solves a problem that network isolation solves anyway | Used until `60891e7`, removed |
 | **Network isolation** only: WordPress and Varnish reachable from the edge alone | No code, no secret; what production does anyway | Nothing catches a misconfiguration | **Chosen**. The README keeps the header as an optional second line of defence |
 
-## 7. Keeping the session alive
+## 8. Keeping the session alive
 
 | Option | For | Against | Outcome |
 | --- | --- | --- | --- |
@@ -80,7 +101,7 @@ their name from the community app.
 | **Refresh token** held by the relying party | Invisible to the user | Long-lived secret material in the relying party; more logic | Considered, rejected |
 | **Long-lived token** (hours) | Nothing to build | Role changes take hours to propagate | Considered, rejected |
 
-## 8. Smaller decisions
+## 9. Smaller decisions
 
 - **Every logged-in user has a level.** An early version had a demo user who was logged in with
   level `none`. That state does not exist in the real use case and complicated the page logic

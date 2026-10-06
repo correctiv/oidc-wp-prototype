@@ -139,8 +139,18 @@ async function login() {
   const login = [...jar].flatMap(([d, c]) => [...c].filter(([n, v]) => n === 'example_login' && alive(v) && domainMatches(siteHost, d, v.hostOnly)).map(([, v]) => v))[0];
   if (!login) throw new Error('no example_login cookie visible to the website');
   if (login.hostOnly) throw new Error('example_login is not a domain cookie');
-  const claims = JSON.parse(Buffer.from(login.value.split('.')[1], 'base64url').toString());
-  step(`  ✓ domain-wide id_token cookie carries: ${Object.keys(claims).join(', ')}  (role=${claims.example_role ?? 'none'})`);
+  const parts = login.value.split('.');
+  const [nonce, ciphertext, tag] = parts.map((p) => Buffer.from(p, 'base64'));
+  if (parts.length !== 3 || nonce.length !== 12 || tag.length !== 16) throw new Error('example_login does not look like an encrypted blob');
+  step(`  ✓ domain-wide login cookie is an AES-GCM blob: nonce ${nonce.length} B, ciphertext ${ciphertext.length} B, tag ${tag.length} B; no readable claims`);
+  if (process.env.LOGIN_COOKIE_KEY) {
+    const { createDecipheriv } = await import('node:crypto');
+    const d = createDecipheriv('aes-256-gcm', Buffer.from(process.env.LOGIN_COOKIE_KEY, 'base64'), nonce);
+    d.setAuthTag(tag);
+    const idToken = Buffer.concat([d.update(ciphertext), d.final()]).toString();
+    const claims = JSON.parse(Buffer.from(idToken.split('.')[1], 'base64url').toString());
+    step(`  ✓ decrypted with LOGIN_COOKIE_KEY, the id_token inside carries: ${Object.keys(claims).join(', ')}  (role=${claims.example_role ?? 'none'})`);
+  }
   step(`  ✓ cookies sent to ${siteHost}: ${cookieNames(siteHost)}`);
   step(`  ✓ cookies sent to ${new URL(COMMUNITY).hostname}: ${cookieNames(new URL(COMMUNITY).hostname)}`);
   step(`  ✓ cookies sent to ${new URL(IDP).hostname}: ${cookieNames(new URL(IDP).hostname)}`);

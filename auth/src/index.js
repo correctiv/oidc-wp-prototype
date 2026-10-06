@@ -13,6 +13,7 @@
 //   /auth/logout    delete both cookies, RP-initiated logout at the IdP, return to ?return=
 //   /contact/me     JSON about the logged-in user, for the website's client-side call (CORS)
 
+import { createCipheriv, randomBytes } from 'node:crypto';
 import express from 'express';
 import { createOidc } from './oidc.js';
 import { AUTH_COOKIE, COMMUNITY_COOKIE, createAuthState, createCommunitySession, parseCookies } from './state.js';
@@ -36,6 +37,10 @@ const secure = appUrl.startsWith('https://');
 const cookieDomain = env('COOKIE_DOMAIN');
 const cookieMaxAgeSeconds = Number(env('COOKIE_MAX_AGE_SECONDS', '43200'));
 const LOGIN_COOKIE = 'example_login';
+// Shared with HAProxy, which decrypts the cookie. Confidentiality only: the token inside still
+// carries the IdP's signature, so the key cannot be used to forge a login.
+const loginCookieKey = Buffer.from(env('LOGIN_COOKIE_KEY'), 'base64');
+if (loginCookieKey.length !== 32) throw new Error('LOGIN_COOKIE_KEY must be 32 bytes, base64 encoded');
 
 const authState = createAuthState({
   secret: env('APP_SECRET'),
@@ -53,10 +58,18 @@ const oidc = createOidc({
 });
 
 // The login cookie is scoped to the parent domain on purpose: that is what lets the website see
-// it. Every other subdomain receives it as well, which is why it holds nothing but the lean
-// id_token (an opaque sub, the level, timestamps) and lives at most as long as the silent
-// refresh needs it to.
-const loginCookie = { domain: cookieDomain, path: '/', httpOnly: true, sameSite: 'lax', secure };
+// it. Every other subdomain receives it as well, which is why its content is encrypted: other
+// hosts see a random blob, not even the opaque sub or the level. Standard base64 is kept as is;
+// Express would otherwise percent-encode it and HAProxy expects it raw.
+const loginCookie = { domain: cookieDomain, path: '/', httpOnly: true, sameSite: 'lax', secure, encode: String };
+
+/** AES-256-GCM with a fresh nonce per token: equal tokens never produce equal cookies. */
+function encryptForEdge(idToken) {
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', loginCookieKey, nonce);
+  const ciphertext = Buffer.concat([cipher.update(idToken, 'utf8'), cipher.final()]);
+  return [nonce, ciphertext, cipher.getAuthTag()].map((b) => b.toString('base64')).join('.');
+}
 // This app's own cookies are host-only; nobody but this app needs them.
 const stateCookie = { path: '/', httpOnly: true, sameSite: 'lax', secure };
 const sessionCookie = { path: '/', httpOnly: true, sameSite: 'lax', secure };
@@ -151,7 +164,7 @@ app.get('/auth/callback', async (req, res) => {
     }
     const ttlSeconds = Math.max(1, claims.exp - Math.floor(Date.now() / 1000));
     // The login cookie outlives the token so that an expired token can still trigger the silent refresh.
-    res.cookie(LOGIN_COOKIE, idToken, { ...loginCookie, maxAge: cookieMaxAgeSeconds * 1000 });
+    res.cookie(LOGIN_COOKIE, encryptForEdge(idToken), { ...loginCookie, maxAge: cookieMaxAgeSeconds * 1000 });
     const profile = { sub: claims.sub, username: userinfo.preferred_username, role };
     res.cookie(COMMUNITY_COOKIE, await communitySession.mint(profile, ttlSeconds), { ...sessionCookie, maxAge: ttlSeconds * 1000 });
     console.log(`[auth] login successful, role=${role} silent=${state.silent}`);

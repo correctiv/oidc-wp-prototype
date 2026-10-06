@@ -28,7 +28,8 @@ check "3. Forged X-Example-Role is ignored"           "none" "$(header x-example
 check "   ... and hits the same cache entry"          "none|*" "$(header x-cache-key -H 'X-Example-Role: full' "$SITE/")"
 check "4. Bogus login cookie yields none"             "none" "$(header x-example-role -b 'example_login=abc.def.ghi' "$SITE/")"
 check "   ... without a redirect"                     "200"  "$(status -b 'example_login=abc.def.ghi' "$SITE/")"
-check "   Self-signed HS256 token yields none"        "none" "$(header x-example-role -b "example_login=$(node -e "import('jose').then(async j=>{const k=new TextEncoder().encode('x'.repeat(32));console.log(await new j.SignJWT({example_role:'full',iss:'http://auth.example.localhost:8080/realms/example',aud:'community-app'}).setProtectedHeader({alg:'HS256'}).setExpirationTime('1h').sign(k))})" 2>/dev/null || echo bad)" "$SITE/")"
+check "   Unencrypted JWT in the cookie yields none"   "none" "$(header x-example-role -b "example_login=$(cd auth && node -e "import('jose').then(async j=>{const k=new TextEncoder().encode('x'.repeat(32));console.log(await new j.SignJWT({example_role:'full',iss:'http://auth.example.localhost:8080/realms/example',aud:'community-app'}).setProtectedHeader({alg:'HS256'}).setExpirationTime('1h').sign(k))})" 2>/dev/null || echo bad)" "$SITE/")"
+check "   Blob encrypted with a wrong key yields none"  "none" "$(header x-example-role -b "example_login=$(node -e "const c=require('crypto');const n=c.randomBytes(12),k=c.randomBytes(32),ci=c.createCipheriv('aes-256-gcm',k,n);const ct=Buffer.concat([ci.update('eyJhbGciOiJSUzI1NiJ9.e30.x'),ci.final()]);console.log([n,ct,ci.getAuthTag()].map(b=>b.toString('base64')).join('.'))")" "$SITE/")"
 check "5. No Set-Cookie on a cached page"             ""     "$(header set-cookie "$SITE/")"
 check "6. Assets do not vary by role"                 "-|*"  "$(header x-cache-key "$SITE/wp-includes/css/dist/block-library/style.min.css")"
 check "7. /wp-admin/ bypasses the cache"              "BYPASS(path)" "$(header x-cache "$SITE/wp-admin/")"
@@ -56,6 +57,8 @@ check "    No contact card in the anonymous variant"  "0"    "$(curl -s "$SITE/"
 check "    ... and no username in any cached page"    "0"    "$(curl -s "$SITE/" | grep -c 'anna')"
 
 echo
+# With the key, the login flow also shows the id_token inside the encrypted cookie.
+export LOGIN_COOKIE_KEY=${LOGIN_COOKIE_KEY:-ZGVtby1sb2dpbi1jb29raWUta2V5LTMyLWJ5dGVzISE=}
 for u in anna ben; do node scripts/login-flow.mjs login "$u" || ((fail++)); done
 node scripts/login-flow.mjs logout anna || ((fail++))
 
