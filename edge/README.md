@@ -63,15 +63,8 @@ varnishtest varnish/tests/edge.vtc
 
 ## Operational notes
 
-- **Key rotation (IdP).** HAProxy verifies against one PEM. Refresh it from the JWKS on the
-  IdP's rotation schedule and reload HAProxy; during the grace period a second `jwt_verify`
-  attempt with the previous key keeps old tokens valid.
-- **Key rotation (cookie).** Accept the old and the new `EDGE_LOGIN_COOKIE_KEY` for one cookie
-  lifetime (a second `aes_gcm_dec` attempt), then let the community app switch, then drop the old key.
 - **Network.** Varnish and WordPress must be reachable from HAProxy only; the role header is
   trusted downstream.
 - **Logging.** Do not log the `Cookie` header on the HAProxy frontend.
 - **Two alerts worth having:** decryption failures (a key mismatch after rotation looks exactly
   like this) and silent-refresh redirects per minute (a loop or an IdP problem looks like this).
-- **Checking against a real cookie:** log in at the community app in a browser, copy the cookie
-  value, and `curl -b '<name>=<value>' http://<site>/ -D - -o /dev/null | grep -i <role header>`.
