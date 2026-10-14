@@ -14,8 +14,9 @@ sub vcl_recv {
         return (pipe);
     }
 
-    # Only the known levels; anything else, including a missing header, is "none".
-    if (req.http.X-Example-Role !~ "^(limited|full)$") {
+    # HAProxy always sets the level; a missing header can only mean a request that did not come
+    # through it, which is "none".
+    if (!req.http.X-Example-Role || req.http.X-Example-Role == "") {
         set req.http.X-Example-Role = "none";
     }
     unset req.http.X-Cache-Decision;

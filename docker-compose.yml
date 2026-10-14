@@ -144,9 +144,7 @@ services:
       LOGIN_COOKIE_NAME: ${EDGE_LOGIN_COOKIE_NAME:-example_login}
       LOGIN_COOKIE_KEY: ${LOGIN_COOKIE_KEY:-ZGVtby1sb2dpbi1jb29raWUta2V5LTMyLWJ5dGVzISE=}
       OIDC_ISSUER: ${EDGE_OIDC_ISSUER:-http://auth.example.localhost:8080/realms/example}
-      OIDC_AUDIENCE: ${EDGE_OIDC_AUDIENCE:-community-app}
       ROLE_CLAIM: ${EDGE_ROLE_CLAIM:-example_role}
-      ROLE_VALUES: ${EDGE_ROLE_VALUES:-limited|full}
       REFRESH_URL: ${EDGE_REFRESH_URL:-http://community.example.localhost:8001/auth/refresh}
     volumes:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro

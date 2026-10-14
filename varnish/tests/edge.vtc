@@ -1,4 +1,4 @@
-varnishtest "Edge: cache per access level, header normalisation, bypass rules"
+varnishtest "Edge: cache per access level, missing header, bypass rules"
 
 # WordPress mock. Requests arrive in the order of the client blocks below (misses and passes only).
 server s1 {
@@ -14,6 +14,11 @@ server s1 {
     expect req.http.X-Example-Role == "full"
     expect req.http.Cookie == "other=1"
     txresp -hdr "Cache-Control: public, s-maxage=60" -body "role=full"
+
+    # c3: a level Varnish has never heard of gets its own entry, no questions asked
+    rxreq
+    expect req.http.X-Example-Role == "patron"
+    txresp -hdr "Cache-Control: public, s-maxage=60" -body "role=patron"
 
     # c4: asset requested as full, cached without the level
     rxreq
@@ -77,12 +82,18 @@ client c2 {
     expect resp.body == "role=full"
 } -run
 
-# 3. Unknown level is normalised to none and hits the anonymous entry
+# 3. Levels are not whitelisted here: a new one is simply another cache entry
 client c3 {
-    txreq -url "/" -hdr "X-Example-Role: admin"
+    txreq -url "/" -hdr "X-Example-Role: patron"
+    rxresp
+    expect resp.http.X-Cache == "MISS"
+    expect resp.http.X-Cache-Key ~ "^patron[|]"
+    expect resp.http.X-Example-Role == "patron"
+    expect resp.body == "role=patron"
+
+    txreq -url "/" -hdr "X-Example-Role: "
     rxresp
     expect resp.http.X-Cache == "HIT"
-    expect resp.http.X-Cache-Key ~ "^none[|]"
     expect resp.http.X-Example-Role == "none"
     expect resp.body == "role=none"
 } -run

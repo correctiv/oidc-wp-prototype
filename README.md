@@ -15,7 +15,7 @@ Three hostnames under one parent domain, three separate services. The community 
 1. **WordPress is not an OIDC client.** The community app is the relying party and serves `/auth/*`. WordPress never sees a token or a user.
 2. **The cookie is the IdP's own `id_token`, lean and encrypted.** Only the `openid` scope plus the role claim are requested, so the token carries an opaque `sub`, the role and standard timestamps. No email, no name. The community app encrypts it with AES-256-GCM and a fresh nonce before setting the cookie, so the cookie itself is an unreadable blob that differs on every login even for the same user.
 3. **Two cookies with two jobs, and a bounded blast radius.** The community app's session with personal data is host-only (`__Host-` over https); nothing but the community app ever sees it. The domain-wide login cookie is received by every host under the parent domain, which is why it is encrypted: another subdomain learns nothing from it, not even the level or the opaque `sub`. The worst it can do is replay the cookie against the website and read gated content as that user for at most 15 minutes; it cannot reach the community API or any personal data.
-4. **The edge trusts the IdP, not the community app.** After decrypting the cookie, HAProxy verifies the RS256 signature with the IdP's public key on disk and checks `iss`, `aud` and `exp` on every request. The encryption key shared with the community app protects confidentiality only: whoever has it can read tokens, but forging one would still need the IdP's signature. The community app is a courier; it cannot invent roles.
+4. **The edge trusts the IdP, not the community app.** After decrypting the cookie, HAProxy verifies the RS256 signature with the IdP's public key on disk and checks `iss` and `exp` on every request. The encryption key shared with the community app protects confidentiality only: whoever has it can read tokens, but forging one would still need the IdP's signature. The community app is a courier; it cannot invent roles. There is no `aud` check: the encryption already binds the cookie to the community app, which only wraps tokens issued to its own client, and within one IdP instance a token for another client would carry the same user and role anyway.
 5. **Header hygiene in HAProxy.** `X-Example-Role` from the client is discarded, the login cookie is stripped before Varnish, and the role header is set from the verified token only. Anything that fails verification is `none`.
 6. **Varnish and WordPress are reachable only through HAProxy.** They live on the Docker network; in production a firewall or private network must guarantee the same, otherwise the header could be forged. The community app is its own public service.
 7. **Role in the cache hash, not in `Vary`.** Varnish adds the role in `vcl_hash`; static assets share one entry across roles.
@@ -104,7 +104,7 @@ sequenceDiagram
     participant V as Varnish
     participant W as WordPress
     B->>H: GET www…/members/ (cookie example_login)
-    H->>H: aes_gcm_dec with the shared key, jwt_verify with idp-public.pem,<br/>check iss/aud/exp, role := example_role claim, strip the cookie
+    H->>H: aes_gcm_dec with the shared key, jwt_verify with idp-public.pem,<br/>check iss/exp, role := example_role claim, strip the cookie
     H->>V: GET /members/, X-Example-Role: full
     V->>V: vcl_hash: url + host + role
     alt cache HIT
@@ -160,14 +160,15 @@ sequenceDiagram
 | Step | Behaviour |
 | --- | --- |
 | Decrypt | `req.cook(example_login)` is `nonce.ciphertext.tag`; `field()` splits it, `aes_gcm_dec(256, …)` with `LOGIN_COOKIE_KEY` from the environment yields the `id_token`. A wrong key, a tampered blob or plain text yields an empty token. |
-| Token check | `jwt_header_query` pins `RS256`, `jwt_verify` with `idp-public.pem`, `jwt_payload_query` checks `iss` and `aud` and reads `exp` and `example_role`. Missing, tampered, wrong issuer or audience → `none`. |
+| Token check | `jwt_header_query` pins `RS256`, `jwt_verify` with `idp-public.pem`, `jwt_payload_query` checks `iss` and reads `exp` and `example_role`. Missing, tampered or wrong issuer → `none`. |
+| Level | The claim value as issued, checked only for shape (`^[A-Za-z0-9_-]{1,32}$`) so the header and cache key never carry arbitrary text. The edge does not know which levels exist; adding one is a change for the IdP and the website only. |
 | Expiry | `exp` compared with `date()`. Expired but otherwise valid token on a `GET` with `Accept: text/html` → 302 to the community app's `/auth/refresh` with the current URL as `return`. The community app's URL and origin are the literals in the config that have to match the environment. |
 | Hygiene | `X-Example-Role` from the client is deleted; the login cookie is removed from the `Cookie` header (other cookies pass); the header is set from the verified role only. |
 | Key material | The IdP's public key as a PEM file, and the symmetric cookie key as an environment variable. Identity providers rotate signing keys, so a real deployment needs a small job that fetches the JWKS, writes the PEM and reloads HAProxy. The cookie key is rotated by hand together with the community app. `scripts/generate-idp-key.sh` produces the demo signing pair; `openssl rand -base64 32` a cookie key. |
 
 ### Varnish (`varnish/edge.vcl`)
 
-Trusts `X-Example-Role` because only HAProxy can reach it; normalises anything but `limited`/`full` to `none`. Hashes on URL, host and role; assets under `/wp-content/` and `/wp-includes/` without the role. Bypasses the cache for non-GET, `/wp-admin`, `/wp-login.php` and requests with a WordPress login cookie. Drops `Set-Cookie` from cacheable responses and turns non-200 into a short hit-for-miss. Debug headers: `X-Cache`, `X-Cache-Key`, `X-Example-Role`. Plain `varnish:7.7` image, no extra vmods.
+Trusts `X-Example-Role` because only HAProxy can reach it; a missing header is `none`. Which levels exist is not Varnish's business: a new level is simply another cache entry. Hashes on URL, host and role; assets under `/wp-content/` and `/wp-includes/` without the role. Bypasses the cache for non-GET, `/wp-admin`, `/wp-login.php` and requests with a WordPress login cookie. Drops `Set-Cookie` from cacheable responses and turns non-200 into a short hit-for-miss. Debug headers: `X-Cache`, `X-Cache-Key`, `X-Example-Role`. Plain `varnish:7.7` image, no extra vmods.
 
 ### Community app stand-in (`auth/`)
 
@@ -203,9 +204,8 @@ restart HAProxy:
 | --- | --- |
 | `EDGE_LOGIN_COOKIE_NAME` | cookie name, e.g. `__Secure-example_login` |
 | `LOGIN_COOKIE_KEY` | the AES key the community app encrypts with |
-| `EDGE_OIDC_ISSUER`, `EDGE_OIDC_AUDIENCE` | expected `iss` and `aud` |
+| `EDGE_OIDC_ISSUER` | expected `iss` |
 | `EDGE_ROLE_CLAIM` | the claim holding the level |
-| `EDGE_ROLE_VALUES` | accepted levels as a regex alternation, `limited\|full` |
 | `EDGE_REFRESH_URL` | the community app's silent-refresh endpoint |
 
 `scripts/fetch-idp-key.sh <jwks-url> > haproxy/idp-public.pem` converts the IdP's JWKS into the
@@ -220,7 +220,7 @@ tools, and check it against the local edge:
 curl -s -o /dev/null -D - -b '__Secure-example_login=<value>' http://www.example.localhost:8000/ | grep -i x-example-role
 ```
 
-That exercises decryption, signature, issuer, audience, expiry and the claim, which is the whole
+That exercises decryption, signature, issuer, expiry and the claim, which is the whole
 HAProxy side of the contract. A browser cannot do the same against the local edge: it sends a
 cookie for the real parent domain only to hosts under that domain, and a `__Secure-` cookie only
 over https.
