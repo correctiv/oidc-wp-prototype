@@ -192,6 +192,39 @@ The login and logout links point at the community app (`EXAMPLE_COMMUNITY_URL`, 
 
 Realm `example` with a fixed RSA signing key (so HAProxy can hold the matching public key), client `community-app` (confidential, PKCE S256, `basic` scope only, redirect URI on the community host, post-logout URIs on both hosts), a mapper that puts the user attribute `example_role` into the `id_token`, a mapper that exposes the username via userinfo only, and the three demo users. `accessTokenLifespan` (900 s) is also the `id_token` lifetime and therefore the website's session length.
 
+## Pointing the local edge at a real environment
+
+Everything environment-specific in `haproxy/haproxy.cfg` comes from the environment, so the same
+config can check a cookie issued by a real community app and IdP. Set these in `.env`
+(see `.env.example` for the full list), put the IdP's public key in `haproxy/idp-public.pem`, and
+restart HAProxy:
+
+| Variable | Meaning |
+| --- | --- |
+| `EDGE_LOGIN_COOKIE_NAME` | cookie name, e.g. `__Secure-example_login` |
+| `LOGIN_COOKIE_KEY` | the AES key the community app encrypts with |
+| `EDGE_OIDC_ISSUER`, `EDGE_OIDC_AUDIENCE` | expected `iss` and `aud` |
+| `EDGE_ROLE_CLAIM` | the claim holding the level |
+| `EDGE_ROLE_VALUES` | accepted levels as a regex alternation, `limited\|full` |
+| `EDGE_REFRESH_URL` | the community app's silent-refresh endpoint |
+
+`scripts/fetch-idp-key.sh <jwks-url> > haproxy/idp-public.pem` converts the IdP's JWKS into the
+PEM file HAProxy needs; it is also the job a real deployment runs on key rotation. HAProxy
+verifies against one key, so a rotation window needs a second `jwt_verify` attempt with the
+previous key.
+
+Then log in at the real community app in a browser, copy the cookie value from the developer
+tools, and check it against the local edge:
+
+```bash
+curl -s -o /dev/null -D - -b '__Secure-example_login=<value>' http://www.example.localhost:8000/ | grep -i x-example-role
+```
+
+That exercises decryption, signature, issuer, audience, expiry and the claim, which is the whole
+HAProxy side of the contract. A browser cannot do the same against the local edge: it sends a
+cookie for the real parent domain only to hosts under that domain, and a `__Secure-` cookie only
+over https.
+
 ## Pitfalls of the local environment
 
 - **Keycloak sets `Secure` cookies on `*.localhost`**, because like browsers it treats `*.localhost` as a secure context. Chrome and Firefox accept that over http, `curl` does not. That is why `scripts/login-flow.mjs` plays the browser for the automated flows.

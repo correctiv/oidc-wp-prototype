@@ -31,6 +31,8 @@ check "   ... without a redirect"                     "200"  "$(status -b 'examp
 check "   Unencrypted JWT in the cookie yields none"   "none" "$(header x-example-role -b "example_login=$(cd auth && node -e "import('jose').then(async j=>{const k=new TextEncoder().encode('x'.repeat(32));console.log(await new j.SignJWT({example_role:'full',iss:'http://auth.example.localhost:8080/realms/example',aud:'community-app'}).setProtectedHeader({alg:'HS256'}).setExpirationTime('1h').sign(k))})" 2>/dev/null || echo bad)" "$SITE/")"
 check "   Blob encrypted with a wrong key yields none"  "none" "$(header x-example-role -b "example_login=$(node -e "const c=require('crypto');const n=c.randomBytes(12),k=c.randomBytes(32),ci=c.createCipheriv('aes-256-gcm',k,n);const ct=Buffer.concat([ci.update('eyJhbGciOiJSUzI1NiJ9.e30.x'),ci.final()]);console.log([n,ct,ci.getAuthTag()].map(b=>b.toString('base64')).join('.'))")" "$SITE/")"
 check "5. No Set-Cookie on a cached page"             ""     "$(header set-cookie "$SITE/")"
+curl -s -o /dev/null -b "a=1; example_login=abc.def.ghi; probe=$$" "$SITE/"
+check "   Login cookie never reaches Varnish"          "cookie: a=1; probe=$$" "$(docker compose exec -T varnish varnishlog -d -g request -q "ReqHeader ~ \"probe=$$\"" -i ReqHeader 2>/dev/null | grep -io 'cookie: .*' | tail -1)"
 check "6. Assets do not vary by role"                 "-|*"  "$(header x-cache-key "$SITE/wp-includes/css/dist/block-library/style.min.css")"
 check "7. /wp-admin/ bypasses the cache"              "BYPASS(path)" "$(header x-cache "$SITE/wp-admin/")"
 check "   /wp-login.php bypasses the cache"           "BYPASS(path)" "$(header x-cache "$SITE/wp-login.php")"

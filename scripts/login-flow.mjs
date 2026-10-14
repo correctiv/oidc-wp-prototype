@@ -116,6 +116,9 @@ function hiddenInputs(html) {
 async function currentRole(path = '/') {
   const res = await request(`${SITE}${path}`);
   if (res.status !== 200) throw new Error(`GET ${path}: HTTP ${res.status}`);
+  if (process.env.DEBUG_HEADERS) {
+    for (const [k, v] of res.headers) if (k.startsWith('x-')) step(`  ⋯ ${k}: ${v}`);
+  }
   const html = await res.text();
   const visible = SECTIONS.filter((s) => html.includes(s));
   step(`  ☐ visible sections on ${path}: ${visible.join(' | ') || '(none)'}  [${res.headers.get('x-cache')}]`);
