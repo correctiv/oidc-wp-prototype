@@ -128,7 +128,7 @@ async function currentRole(path = '/') {
 async function login() {
   const returnTo = `${SITE}/members/`;
   step(`\n▶ Login as ${user} via ${COMMUNITY}/auth/login, returning to ${returnTo}`);
-  const page = await follow(`${COMMUNITY}/auth/login?return=${encodeURIComponent(returnTo)}`);
+  const page = await follow(`${COMMUNITY}/auth/login?next=${encodeURIComponent(returnTo)}`);
   if (!page.html.includes('kc-form-login')) throw new Error('Keycloak login page not reached');
   const body = hiddenInputs(page.html);
   body.set('username', user);
@@ -174,7 +174,7 @@ async function contactMe() {
 
 async function communityLogout() {
   step(`\n▶ Logout via ${COMMUNITY}/auth/logout`);
-  await confirmIdpLogout(await follow(`${COMMUNITY}/auth/logout?return=${encodeURIComponent(`${SITE}/`)}`));
+  await confirmIdpLogout(await follow(`${COMMUNITY}/auth/logout?next=${encodeURIComponent(`${SITE}/`)}`));
 }
 
 async function idpLogoutDirect() {

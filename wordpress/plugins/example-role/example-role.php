@@ -112,7 +112,7 @@ add_shortcode(
 	'example_login_link',
 	function ( $atts ) {
 		$atts = shortcode_atts( array( 'text' => 'Log in' ), $atts, 'example_login_link' );
-		$href = example_role_community_url() . '/auth/login?return=' . rawurlencode( example_role_current_url() );
+		$href = example_role_community_url() . '/auth/login?next=' . rawurlencode( example_role_current_url() );
 		return sprintf( '<a class="example-role-link" href="%s">%s</a>', esc_url( $href ), esc_html( $atts['text'] ) );
 	}
 );
@@ -122,7 +122,7 @@ add_shortcode(
 	'example_logout_link',
 	function ( $atts ) {
 		$atts = shortcode_atts( array( 'text' => 'Log out' ), $atts, 'example_logout_link' );
-		$href = example_role_community_url() . '/auth/logout?return=' . rawurlencode( example_role_current_url() );
+		$href = example_role_community_url() . '/auth/logout?next=' . rawurlencode( example_role_current_url() );
 		return sprintf( '<a class="example-role-link" href="%s">%s</a>', esc_url( $href ), esc_html( $atts['text'] ) );
 	}
 );

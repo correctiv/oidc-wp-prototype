@@ -38,16 +38,16 @@ check "7. /wp-admin/ bypasses the cache"              "BYPASS(path)" "$(header x
 check "   /wp-login.php bypasses the cache"           "BYPASS(path)" "$(header x-cache "$SITE/wp-login.php")"
 check "8. Start page for none shows the login hint"   "1" "$(curl -s "$SITE/" | grep -c 'You are not logged in')"
 check "   ... and no full-only content"               "0" "$(curl -s "$SITE/" | grep -c 'Level full only')"
-check "   Login link points at the community app"     "$COMMUNITY/auth/login?return=*" "$(curl -s "$SITE/" | grep -oE 'href="[^"]*auth/login[^"]*"' | head -1 | sed 's/href="//; s/"$//; s/&amp;/\&/g')"
+check "   Login link points at the community app"     "$COMMUNITY/auth/login?next=*" "$(curl -s "$SITE/" | grep -oE 'href="[^"]*auth/login[^"]*"' | head -1 | sed 's/href="//; s/"$//; s/&amp;/\&/g')"
 
 echo; echo "━━━ Community app: OIDC flow ━━━"
-LOGIN_LOC=$(header location "$COMMUNITY/auth/login?return=$SITE/members/")
+LOGIN_LOC=$(header location "$COMMUNITY/auth/login?next=$SITE/members/")
 check "9. /auth/login redirects to the IdP"           "$KC/realms/example/protocol/openid-connect/auth?*" "$LOGIN_LOC"
 check "    ... with PKCE S256"                        "*code_challenge_method=S256*" "$LOGIN_LOC"
 check "    ... with scope=openid only"                "*scope=openid&*" "$LOGIN_LOC"
 check "    ... and no-store"                          "no-store" "$(header cache-control "$COMMUNITY/auth/login")"
 # The return URL is signed into the example_auth cookie; foreign hosts must fall back to the community home.
-RT=$(header set-cookie "$COMMUNITY/auth/login?return=https://evil.example/" | sed 's/^example_auth=//; s/;.*//' | cut -d. -f2 | python3 -c "import base64,json,sys; t=sys.stdin.read().strip(); print(json.loads(base64.urlsafe_b64decode(t + '=' * (-len(t) % 4)))['returnTo'])")
+RT=$(header set-cookie "$COMMUNITY/auth/login?next=https://evil.example/" | sed 's/^example_auth=//; s/;.*//' | cut -d. -f2 | python3 -c "import base64,json,sys; t=sys.stdin.read().strip(); print(json.loads(base64.urlsafe_b64decode(t + '=' * (-len(t) % 4)))['returnTo'])")
 check "10. Open redirects are neutralised"            "$COMMUNITY/" "$RT"
 check "11. Community home answers"                    "200" "$(status "$COMMUNITY/")"
 

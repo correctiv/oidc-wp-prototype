@@ -7,10 +7,10 @@
 //                       data lives here and nowhere else. (__Host-community_session over https.)
 //
 //   /               tiny status page (what the real community app would be)
-//   /auth/login     start the login at the IdP, then return to ?return=
+//   /auth/login     start the login at the IdP, then continue to ?next=
 //   /auth/refresh   silent re-login (prompt=none) after the id_token expired
 //   /auth/callback  exchange the code, set both cookies, redirect to the return URL
-//   /auth/logout    delete both cookies, RP-initiated logout at the IdP, return to ?return=
+//   /auth/logout    delete both cookies, RP-initiated logout at the IdP, continue to ?next=
 //   /contact/me     JSON about the logged-in user, for the website's client-side call (CORS)
 
 import { createCipheriv, randomBytes } from 'node:crypto';
@@ -120,15 +120,15 @@ app.get('/', async (req, res) => {
   res.type('html').send(`<!doctype html><title>Community app</title>
 <h1>Community app (stand-in)</h1>
 <p>${status}</p>
-<p><a href="/auth/login?return=${back}">Log in</a> · <a href="/auth/logout?return=${back}">Log out</a> · <a href="/contact/me">/contact/me</a> · <a href="${siteUrl}/">Go to the website</a></p>
+<p><a href="/auth/login?next=${back}">Log in</a> · <a href="/auth/logout?next=${back}">Log out</a> · <a href="/contact/me">/contact/me</a> · <a href="${siteUrl}/">Go to the website</a></p>
 <p><small>The real community app would live here. In this prototype it plays the OIDC relying party and answers /contact/me.</small></p>`);
 });
 
 async function startAuth(req, res, { silent }) {
-  const returnTo = authState.sanitiseReturn(str(req.query.return));
+  const returnTo = authState.sanitiseReturn(str(req.query.next));
   const { state, nonce, codeVerifier, url } = await oidc.createAuthRequest({ silent });
   res.cookie(AUTH_COOKIE, await authState.mint({ state, nonce, codeVerifier, returnTo, silent }), { ...stateCookie, maxAge: 300_000 });
-  console.log(`[auth] ${silent ? 'silent re-login' : 'login'} started, return=${returnTo}`);
+  console.log(`[auth] ${silent ? 'silent re-login' : 'login'} started, next=${returnTo}`);
   res.redirect(302, url);
 }
 
@@ -178,10 +178,10 @@ app.get('/auth/callback', async (req, res) => {
 });
 
 app.get('/auth/logout', async (req, res) => {
-  const returnTo = new URL(authState.sanitiseReturn(str(req.query.return)), appUrl).toString();
+  const returnTo = new URL(authState.sanitiseReturn(str(req.query.next)), appUrl).toString();
   clearLogin(res);
   res.clearCookie(AUTH_COOKIE, stateCookie);
-  console.log(`[auth] logout, redirecting to the IdP, return=${returnTo}`);
+  console.log(`[auth] logout, redirecting to the IdP, next=${returnTo}`);
   res.redirect(302, await oidc.buildLogoutUrl(returnTo));
 });
 

@@ -83,7 +83,7 @@ sequenceDiagram
     participant K as Keycloak
     participant H as HAProxy
     participant W as Varnish + WordPress
-    B->>C: GET community…/auth/login?return=http://www…/members/
+    B->>C: GET community…/auth/login?next=http://www…/members/
     C->>B: 302 → Keycloak /auth (PKCE, state, nonce)<br/>Set-Cookie example_auth (host-only, 5 min)
     B->>K: login form, POST credentials
     K->>B: 302 → community…/auth/callback?code&state
@@ -141,7 +141,7 @@ sequenceDiagram
     participant C as Community app
     participant K as Keycloak
     B->>H: GET www…/ (Accept: text/html, token signature ok but exp passed)
-    H->>B: 302 → community…/auth/refresh?return=http://www…/
+    H->>B: 302 → community…/auth/refresh?next=http://www…/
     B->>C: GET community…/auth/refresh
     C->>B: 302 → Keycloak /auth … prompt=none
     alt IdP session alive
@@ -162,7 +162,7 @@ sequenceDiagram
 | Decrypt | `req.cook(example_login)` is `nonce.ciphertext.tag`; `field()` splits it, `aes_gcm_dec(256, …)` with `LOGIN_COOKIE_KEY` from the environment yields the `id_token`. A wrong key, a tampered blob or plain text yields an empty token. |
 | Token check | `jwt_header_query` pins `RS256`, `jwt_verify` with `idp-public.pem`, `jwt_payload_query` checks `iss` and reads `exp` and `example_role`. Missing, tampered or wrong issuer → `none`. |
 | Level | The claim value as issued, checked only for shape (`^[A-Za-z0-9_-]{1,32}$`) so the header and cache key never carry arbitrary text. The edge does not know which levels exist; adding one is a change for the IdP and the website only. |
-| Expiry | `exp` compared with `date()`. Expired but otherwise valid token on a `GET` with `Accept: text/html` → 302 to the community app's `/auth/refresh` with the current URL as `return`. The community app's URL and origin are the literals in the config that have to match the environment. |
+| Expiry | `exp` compared with `date()`. Expired but otherwise valid token on a `GET` with `Accept: text/html` → 302 to the community app's `/auth/refresh` with the current URL as `next`. The community app's URL and origin are the literals in the config that have to match the environment. |
 | Hygiene | `X-Example-Role` from the client is deleted; the login cookie is removed from the `Cookie` header (other cookies pass); the header is set from the verified role only. |
 | Key material | The IdP's public key as a PEM file, and the symmetric cookie key as an environment variable. Identity providers rotate signing keys, so a real deployment needs a small job that fetches the JWKS, writes the PEM and reloads HAProxy. The cookie key is rotated by hand together with the community app. `scripts/generate-idp-key.sh` produces the demo signing pair; `openssl rand -base64 32` a cookie key. |
 
@@ -174,7 +174,7 @@ Trusts `X-Example-Role` because only HAProxy can reach it; a missing header is `
 
 Express 5 with `openid-client` and `jose`, three files. `index.js` reads the environment and holds a tiny status page, the four routes `/auth/login`, `/auth/refresh` (same, with `prompt=none`), `/auth/callback`, `/auth/logout`, and `/contact/me`. `oidc.js` wraps `openid-client` (lazy discovery, retried while Keycloak is still starting) and fetches the profile from the userinfo endpoint at login. `state.js` signs the app's two host-only cookies: `example_auth` (state, nonce, PKCE verifier and return URL during the redirect) and `community_session` (the app's own login with `sub`, username and role, living as long as the `id_token`). It also validates return URLs against an allowlist of hosts.
 
-Two cookies with two jobs: `example_login` is the lean `id_token` for the whole domain, encrypted with AES-256-GCM and a fresh nonce (`nonce.ciphertext.tag`, base64) and decrypted by HAProxy. `community_session` is host-only and holds the profile; `/contact/me` answers from it and sends CORS headers only for the website's origin. The username reaches the community app through userinfo, never through the `id_token`, so it never ends up in the domain cookie, encrypted or not. It runs as its own service on port 8001, not behind HAProxy, as the real community app does. The real app would replace all of this with its existing login, keeping three obligations: set the cookie with the AES-GCM-encrypted `id_token` and `Domain` set to the parent domain, delete it on logout and after a failed silent refresh, and accept a `return` parameter on login and logout.
+Two cookies with two jobs: `example_login` is the lean `id_token` for the whole domain, encrypted with AES-256-GCM and a fresh nonce (`nonce.ciphertext.tag`, base64) and decrypted by HAProxy. `community_session` is host-only and holds the profile; `/contact/me` answers from it and sends CORS headers only for the website's origin. The username reaches the community app through userinfo, never through the `id_token`, so it never ends up in the domain cookie, encrypted or not. It runs as its own service on port 8001, not behind HAProxy, as the real community app does. The real app would replace all of this with its existing login, keeping three obligations: set the cookie with the AES-GCM-encrypted `id_token` and `Domain` set to the parent domain, delete it on logout and after a failed silent refresh, and accept a `next` parameter on login and logout.
 
 ### WordPress (`wordpress/plugins/example-role/`)
 
@@ -187,7 +187,7 @@ Two cookies with two jobs: `example_login` is the lean `id_token` for the whole 
 [example_contact_card]   empty placeholder + script that calls /contact/me and shows who is logged in (use inside a min="limited" block)
 ```
 
-The login and logout links point at the community app (`EXAMPLE_COMMUNITY_URL`, defined in `wp-config.php`) with the absolute URL of the current page as `return`. They are part of the page cached per role, so they are not personal data.
+The login and logout links point at the community app (`EXAMPLE_COMMUNITY_URL`, defined in `wp-config.php`) with the absolute URL of the current page as `next`. They are part of the page cached per role, so they are not personal data.
 
 ### Keycloak (`keycloak/realm-example.json`)
 
