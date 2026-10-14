@@ -168,7 +168,7 @@ sequenceDiagram
 
 ### Varnish (`varnish/edge.vcl`)
 
-Trusts `X-Example-Role` because only HAProxy can reach it; a missing header is `none`. Which levels exist is not Varnish's business: a new level is simply another cache entry. Hashes on URL, host and role; assets under `/wp-content/` and `/wp-includes/` without the role. Bypasses the cache for non-GET, `/wp-admin`, `/wp-login.php` and requests with a WordPress login cookie. Drops `Set-Cookie` from cacheable responses and turns non-200 into a short hit-for-miss. Debug headers: `X-Cache`, `X-Cache-Key`, `X-Example-Role`. Plain `varnish:7.7` image, no extra vmods.
+Trusts the role header because only HAProxy can reach it; a missing header is `none`. Which levels exist is not Varnish's business: a new level is simply another cache entry. VCL cannot read the environment, so `edge.vcl` is a template with a `${ROLE_HEADER}` placeholder that the Varnish service's entrypoint renders with `sed` at start (and `tests/edge.vtc` renders the same way); `default.vcl` includes the rendered file. Hashes on URL, host and role; assets under `/wp-content/` and `/wp-includes/` without the role. Bypasses the cache for non-GET, `/wp-admin`, `/wp-login.php` and requests with a WordPress login cookie. Drops `Set-Cookie` from cacheable responses and turns non-200 into a short hit-for-miss. Debug headers: `X-Cache`, `X-Cache-Key`, `X-Example-Role`. Plain `varnish:7.7` image, no extra vmods.
 
 ### Community app stand-in (`auth/`)
 
@@ -206,6 +206,7 @@ restart HAProxy:
 | `LOGIN_COOKIE_KEY` | the AES key the community app encrypts with |
 | `EDGE_OIDC_ISSUER` | expected `iss` |
 | `EDGE_ROLE_CLAIM` | the claim holding the level |
+| `EDGE_ROLE_HEADER` | the header carrying the level to Varnish and WordPress; the one value all three teams share |
 | `EDGE_REFRESH_URL` | the community app's silent-refresh endpoint |
 
 `scripts/fetch-idp-key.sh <jwks-url> > haproxy/idp-public.pem` converts the IdP's JWKS into the
@@ -268,7 +269,7 @@ haproxy/haproxy.cfg          id_token verification, X-Example-Role, cookie strip
 haproxy/idp-public.pem       the IdP's public key (demo pair, see scripts/generate-idp-key.sh)
 keycloak/realm-example.json  realm with fixed signing key, client community-app, role mapper, demo users
 varnish/default.vcl          backend wiring
-varnish/edge.vcl             cache per role, bypass rules, response hygiene
+varnish/edge.vcl             cache per role, bypass rules, response hygiene (template: ${ROLE_HEADER})
 varnish/tests/edge.vtc       varnishtest with a mocked WordPress backend
 auth/src/index.js            environment, status page, routes /auth/*
 auth/src/oidc.js             openid-client: discovery, PKCE, code exchange, id_token validation

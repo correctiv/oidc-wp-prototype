@@ -6,4 +6,5 @@ backend wordpress {
     .port = "80";
 }
 
-include "/etc/varnish/edge.vcl";
+# edge.vcl is rendered from the template at container start (see docker-compose.yml).
+include "/tmp/edge.vcl";

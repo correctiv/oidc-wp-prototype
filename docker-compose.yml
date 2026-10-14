@@ -18,6 +18,7 @@ x-wp-env: &wp-env
     define('WP_HOME', 'http://www.example.localhost:8000');
     define('WP_SITEURL', 'http://www.example.localhost:8000');
     define('EXAMPLE_ROLE_CACHE_TTL', 60);
+    define('EXAMPLE_ROLE_HEADER', '${EDGE_ROLE_HEADER:-X-Example-Role}');
     define('EXAMPLE_COMMUNITY_URL', 'http://community.example.localhost:8001');
     define('DISABLE_WP_CRON', true);
 
@@ -122,14 +123,18 @@ services:
   # Cache per access level. Trusts X-Example-Role because only HAProxy can reach it.
   varnish:
     image: varnish:7.7
+    # edge.vcl is a template (VCL cannot read the environment): render the header name into it,
+    # then hand over to the image's own entrypoint with the usual varnishd parameters.
+    entrypoint: ["sh", "-c", "sed 's|[$$]{ROLE_HEADER}|'\"$$ROLE_HEADER\"'|g' /etc/varnish/edge.vcl.in > /tmp/edge.vcl && exec /usr/local/bin/docker-varnish-entrypoint \"$$@\"", "--"]
     command: ["-p", "default_ttl=${DEFAULT_CACHE_TTL_SECONDS:-60}"]
     depends_on:
       - wordpress
     environment:
       VARNISH_SIZE: 100M
+      ROLE_HEADER: ${EDGE_ROLE_HEADER:-X-Example-Role}
     volumes:
       - ./varnish/default.vcl:/etc/varnish/default.vcl:ro
-      - ./varnish/edge.vcl:/etc/varnish/edge.vcl:ro
+      - ./varnish/edge.vcl:/etc/varnish/edge.vcl.in:ro
 
   # The edge in front of the website: verifies the login cookie on every request, sets X-Example-Role.
   haproxy:
@@ -145,6 +150,7 @@ services:
       LOGIN_COOKIE_KEY: ${LOGIN_COOKIE_KEY:-ZGVtby1sb2dpbi1jb29raWUta2V5LTMyLWJ5dGVzISE=}
       OIDC_ISSUER: ${EDGE_OIDC_ISSUER:-http://auth.example.localhost:8080/realms/example}
       ROLE_CLAIM: ${EDGE_ROLE_CLAIM:-example_role}
+      ROLE_HEADER: ${EDGE_ROLE_HEADER:-X-Example-Role}
       REFRESH_URL: ${EDGE_REFRESH_URL:-http://community.example.localhost:8001/auth/refresh}
     volumes:
       - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro

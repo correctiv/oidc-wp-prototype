@@ -47,9 +47,14 @@ server s1 {
     txresp -hdr "Cache-Control: private, max-age=100" -body "private"
 } -start
 
+# edge.vcl is a template; render the header name the way docker-compose.yml does.
+shell {
+    sed "s|[$]{ROLE_HEADER}|X-Example-Role|g" "${testdir}/../edge.vcl" > "${tmpdir}/edge.vcl"
+}
+
 varnish v1 -vcl {
     backend wordpress { .host = "${s1_addr}"; .port = "${s1_port}"; }
-    include "${testdir}/../edge.vcl";
+    include "${tmpdir}/edge.vcl";
 } -start
 
 # 1. No header: MISS then HIT, Set-Cookie stripped

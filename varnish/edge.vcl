@@ -1,6 +1,10 @@
 # Varnish behind HAProxy: cache WordPress per access level.
 #
-# HAProxy has already verified the login cookie, removed it and set X-Example-Role. Varnish only
+# ${ROLE_HEADER} is the name of the header HAProxy sets. VCL cannot read the environment, so this
+# file is a template: docker-compose.yml renders it with sed at container start, varnishtest does
+# the same in tests/edge.vtc.
+#
+# HAProxy has already verified the login cookie, removed it and set ${ROLE_HEADER}. Varnish only
 # has to key the cache on that header and keep WordPress' responses clean. Varnish must therefore
 # be reachable from HAProxy only; a client talking to it directly could set the header itself.
 #
@@ -16,8 +20,8 @@ sub vcl_recv {
 
     # HAProxy always sets the level; a missing header can only mean a request that did not come
     # through it, which is "none".
-    if (!req.http.X-Example-Role || req.http.X-Example-Role == "") {
-        set req.http.X-Example-Role = "none";
+    if (!req.http.${ROLE_HEADER} || req.http.${ROLE_HEADER} == "") {
+        set req.http.${ROLE_HEADER} = "none";
     }
     unset req.http.X-Cache-Decision;
     unset req.http.X-Cache-Key;
@@ -40,7 +44,7 @@ sub vcl_recv {
     if (req.url ~ "^/(wp-content|wp-includes)/") {
         set req.http.X-Cache-Key = "-|" + req.http.Host + "|" + req.url;
     } else {
-        set req.http.X-Cache-Key = req.http.X-Example-Role + "|" + req.http.Host + "|" + req.url;
+        set req.http.X-Cache-Key = req.http.${ROLE_HEADER} + "|" + req.http.Host + "|" + req.url;
     }
     return (hash);
 }
@@ -49,7 +53,7 @@ sub vcl_hash {
     hash_data(req.url);
     hash_data(req.http.Host);
     if (req.url !~ "^/(wp-content|wp-includes)/") {
-        hash_data(req.http.X-Example-Role);
+        hash_data(req.http.${ROLE_HEADER});
     }
     return (lookup);
 }
@@ -87,7 +91,7 @@ sub vcl_deliver {
     } else {
         set resp.http.X-Cache = "MISS";
     }
-    set resp.http.X-Example-Role = req.http.X-Example-Role;
+    set resp.http.${ROLE_HEADER} = req.http.${ROLE_HEADER};
     if (req.http.X-Cache-Key) {
         set resp.http.X-Cache-Key = req.http.X-Cache-Key;
     }

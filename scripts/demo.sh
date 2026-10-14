@@ -8,6 +8,7 @@ cd "$(dirname "$0")/.."
 
 SITE=${SITE_URL:-http://www.example.localhost:8000}
 COMMUNITY=${COMMUNITY_URL:-http://community.example.localhost:8001}
+ROLE_HDR=$(echo "${EDGE_ROLE_HEADER:-X-Example-Role}" | tr "A-Z" "a-z")
 KC=${KC_URL:-http://auth.example.localhost:8080}
 pass=0; fail=0
 
@@ -22,14 +23,14 @@ kc_set_token_lifespan() { curl -s -o /dev/null -X PUT -H "Authorization: Bearer 
 echo "━━━ HAProxy + Varnish: cache and header hygiene ━━━"
 docker compose exec -T varnish varnishadm ban "req.url ~ ." >/dev/null
 check "1. First request is a MISS"                    "MISS" "$(header x-cache "$SITE/")"
-check "   Role without a cookie"                      "none" "$(header x-example-role "$SITE/")"
+check "   Role without a cookie"                      "none" "$(header "$ROLE_HDR" "$SITE/")"
 check "2. Second request is a HIT"                    "HIT"  "$(header x-cache "$SITE/")"
-check "3. Forged X-Example-Role is ignored"           "none" "$(header x-example-role -H 'X-Example-Role: full' "$SITE/")"
-check "   ... and hits the same cache entry"          "none|*" "$(header x-cache-key -H 'X-Example-Role: full' "$SITE/")"
-check "4. Bogus login cookie yields none"             "none" "$(header x-example-role -b 'example_login=abc.def.ghi' "$SITE/")"
+check "3. Forged X-Example-Role is ignored"           "none" "$(header "$ROLE_HDR" -H "$ROLE_HDR: full" "$SITE/")"
+check "   ... and hits the same cache entry"          "none|*" "$(header x-cache-key -H "$ROLE_HDR: full" "$SITE/")"
+check "4. Bogus login cookie yields none"             "none" "$(header "$ROLE_HDR" -b 'example_login=abc.def.ghi' "$SITE/")"
 check "   ... without a redirect"                     "200"  "$(status -b 'example_login=abc.def.ghi' "$SITE/")"
-check "   Unencrypted JWT in the cookie yields none"   "none" "$(header x-example-role -b "example_login=$(cd auth && node -e "import('jose').then(async j=>{const k=new TextEncoder().encode('x'.repeat(32));console.log(await new j.SignJWT({example_role:'full',iss:'http://auth.example.localhost:8080/realms/example',aud:'community-app'}).setProtectedHeader({alg:'HS256'}).setExpirationTime('1h').sign(k))})" 2>/dev/null || echo bad)" "$SITE/")"
-check "   Blob encrypted with a wrong key yields none"  "none" "$(header x-example-role -b "example_login=$(node -e "const c=require('crypto');const n=c.randomBytes(12),k=c.randomBytes(32),ci=c.createCipheriv('aes-256-gcm',k,n);const ct=Buffer.concat([ci.update('eyJhbGciOiJSUzI1NiJ9.e30.x'),ci.final()]);console.log([n,ct,ci.getAuthTag()].map(b=>b.toString('base64')).join('.'))")" "$SITE/")"
+check "   Unencrypted JWT in the cookie yields none"   "none" "$(header "$ROLE_HDR" -b "example_login=$(cd auth && node -e "import('jose').then(async j=>{const k=new TextEncoder().encode('x'.repeat(32));console.log(await new j.SignJWT({example_role:'full',iss:'http://auth.example.localhost:8080/realms/example',aud:'community-app'}).setProtectedHeader({alg:'HS256'}).setExpirationTime('1h').sign(k))})" 2>/dev/null || echo bad)" "$SITE/")"
+check "   Blob encrypted with a wrong key yields none"  "none" "$(header "$ROLE_HDR" -b "example_login=$(node -e "const c=require('crypto');const n=c.randomBytes(12),k=c.randomBytes(32),ci=c.createCipheriv('aes-256-gcm',k,n);const ct=Buffer.concat([ci.update('eyJhbGciOiJSUzI1NiJ9.e30.x'),ci.final()]);console.log([n,ct,ci.getAuthTag()].map(b=>b.toString('base64')).join('.'))")" "$SITE/")"
 check "5. No Set-Cookie on a cached page"             ""     "$(header set-cookie "$SITE/")"
 curl -s -o /dev/null -b "a=1; example_login=abc.def.ghi; probe=$$" "$SITE/"
 check "   Login cookie never reaches Varnish"          "cookie: a=1; probe=$$" "$(docker compose exec -T varnish varnishlog -d -g request -q "ReqHeader ~ \"probe=$$\"" -i ReqHeader 2>/dev/null | grep -io 'cookie: .*' | tail -1)"

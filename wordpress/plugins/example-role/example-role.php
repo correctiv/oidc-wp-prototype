@@ -21,15 +21,24 @@ function example_role_levels(): array {
 }
 
 /**
+ * The $_SERVER key of the header carrying the level, configured as EXAMPLE_ROLE_HEADER in wp-config.php.
+ */
+function example_role_header_key(): string {
+	$name = defined( 'EXAMPLE_ROLE_HEADER' ) ? (string) EXAMPLE_ROLE_HEADER : 'X-Example-Role';
+	return 'HTTP_' . strtoupper( str_replace( '-', '_', $name ) );
+}
+
+/**
  * Current access level from the request header. Unknown values become "none".
  *
- * The header comes exclusively from Varnish, which overwrites whatever the client sent.
- * WordPress must therefore only be reachable through Varnish (network isolation).
+ * The header comes exclusively from the edge, which overwrites whatever the client sent.
+ * WordPress must therefore only be reachable through the edge (network isolation).
  */
 function example_role(): string {
 	static $role = null;
 	if ( null === $role ) {
-		$raw  = isset( $_SERVER['HTTP_X_EXAMPLE_ROLE'] ) ? strtolower( trim( (string) $_SERVER['HTTP_X_EXAMPLE_ROLE'] ) ) : '';
+		$key  = example_role_header_key();
+		$raw  = isset( $_SERVER[ $key ] ) ? strtolower( trim( (string) $_SERVER[ $key ] ) ) : '';
 		$role = array_key_exists( $raw, example_role_levels() ) ? $raw : 'none';
 	}
 	return $role;
@@ -171,7 +180,7 @@ add_action(
 		}
 		$ttl = defined( 'EXAMPLE_ROLE_CACHE_TTL' ) ? (int) EXAMPLE_ROLE_CACHE_TTL : 60;
 		header( 'Cache-Control: public, s-maxage=' . $ttl );
-		header( 'Vary: X-Example-Role' );
+		header( 'Vary: ' . ( defined( 'EXAMPLE_ROLE_HEADER' ) ? EXAMPLE_ROLE_HEADER : 'X-Example-Role' ) );
 	}
 );
 

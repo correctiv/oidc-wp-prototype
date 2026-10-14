@@ -18,6 +18,7 @@ const SITE = process.env.SITE_URL || 'http://www.example.localhost:8000';
 const COMMUNITY = process.env.COMMUNITY_URL || 'http://community.example.localhost:8001';
 const IDP = process.env.IDP_URL || 'http://auth.example.localhost:8080/realms/example';
 const EXPECTED = { anna: 'full', ben: 'limited' };
+const ROLE_HEADER = (process.env.EDGE_ROLE_HEADER || 'X-Example-Role').toLowerCase();
 // Text markers from the demo content, used to show which sections are visible.
 const SECTIONS = ['You are not logged in', 'From level limited', 'You have limited access', 'Level full only'];
 
@@ -122,7 +123,7 @@ async function currentRole(path = '/') {
   const html = await res.text();
   const visible = SECTIONS.filter((s) => html.includes(s));
   step(`  ☐ visible sections on ${path}: ${visible.join(' | ') || '(none)'}  [${res.headers.get('x-cache')}]`);
-  return { role: res.headers.get('x-example-role'), cache: res.headers.get('x-cache') };
+  return { role: res.headers.get(ROLE_HEADER), cache: res.headers.get('x-cache') };
 }
 
 async function login() {
@@ -137,7 +138,7 @@ async function login() {
   step(`  ✎ submitting the form to ${short(action)}`);
   const done = await follow(action, { method: 'POST', body, headers: { 'content-type': 'application/x-www-form-urlencoded' } });
   if (done.url.toString() !== returnTo) throw new Error(`login did not end on ${returnTo} but on ${done.url} (HTTP ${done.res.status})`);
-  step(`  ✓ back on ${short(done.url)} with role ${done.res.headers.get('x-example-role')}`);
+  step(`  ✓ back on ${short(done.url)} with role ${done.res.headers.get(ROLE_HEADER)}`);
   const siteHost = new URL(SITE).hostname;
   const login = [...jar].flatMap(([d, c]) => [...c].filter(([n, v]) => n === 'example_login' && alive(v) && domainMatches(siteHost, d, v.hostOnly)).map(([, v]) => v))[0];
   if (!login) throw new Error('no example_login cookie visible to the website');
@@ -205,7 +206,7 @@ async function waitForExpiry() {
   }
   step(`  ↪ 302 → ${short(location)} (silent re-login, prompt=none)`);
   const done = await follow(location);
-  step(`  ✓ landed on ${short(done.url)} with role ${done.res.headers.get('x-example-role')}`);
+  step(`  ✓ landed on ${short(done.url)} with role ${done.res.headers.get(ROLE_HEADER)}`);
   return currentRole();
 }
 
