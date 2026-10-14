@@ -61,7 +61,7 @@ check "    ... and no username in any cached page"    "0"    "$(curl -s "$SITE/"
 
 echo
 # With the key, the login flow also shows the id_token inside the encrypted cookie.
-export LOGIN_COOKIE_KEY=${LOGIN_COOKIE_KEY:-ZGVtby1sb2dpbi1jb29raWUta2V5LTMyLWJ5dGVzISE=}
+export EDGE_LOGIN_COOKIE_KEY=${EDGE_LOGIN_COOKIE_KEY:-ZGVtby1sb2dpbi1jb29raWUta2V5LTMyLWJ5dGVzISE=}
 for u in anna ben; do node scripts/login-flow.mjs login "$u" || ((fail++)); done
 node scripts/login-flow.mjs logout anna || ((fail++))
 

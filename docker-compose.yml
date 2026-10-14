@@ -105,7 +105,9 @@ services:
       COOKIE_DOMAIN: example.localhost
       # The login cookie outlives the id_token so that an expired token can trigger the silent re-login.
       COOKIE_MAX_AGE_SECONDS: ${COOKIE_MAX_AGE_SECONDS:-43200}
-      LOGIN_COOKIE_KEY: ${LOGIN_COOKIE_KEY:-ZGVtby1sb2dpbi1jb29raWUta2V5LTMyLWJ5dGVzISE=}
+      # The same key the edge decrypts with (EDGE_LOGIN_COOKIE_KEY); the stand-in keeps its own name,
+      # as the real community app has its own setting for it.
+      LOGIN_COOKIE_KEY: ${EDGE_LOGIN_COOKIE_KEY:-ZGVtby1sb2dpbi1jb29raWUta2V5LTMyLWJ5dGVzISE=}
       ALLOWED_RETURN_HOSTS: www.example.localhost:8000,community.example.localhost:8001
       OIDC_ISSUER: http://auth.example.localhost:8080/realms/example
       OIDC_CLIENT_ID: community-app
@@ -120,23 +122,25 @@ services:
     volumes:
       - ./auth/src:/app/src:ro
 
-  # Cache per access level. Trusts X-Example-Role because only HAProxy can reach it.
+  # The edge. Both services consume the edge/ directory exactly as a deployment would.
+  # Cache per access level. Trusts the role header because only HAProxy can reach it.
   varnish:
     image: varnish:7.7
-    # edge.vcl is a template (VCL cannot read the environment): render the header name into it,
-    # then hand over to the image's own entrypoint with the usual varnishd parameters.
-    entrypoint: ["sh", "-c", "sed 's|[$$]{ROLE_HEADER}|'\"$$ROLE_HEADER\"'|g' /etc/varnish/edge.vcl.in > /tmp/edge.vcl && exec /usr/local/bin/docker-varnish-entrypoint \"$$@\"", "--"]
-    command: ["-p", "default_ttl=${DEFAULT_CACHE_TTL_SECONDS:-60}"]
+    # VCL cannot read the environment: render the template, then hand over to the image's own
+    # entrypoint with the usual varnishd parameters.
+    entrypoint: ["sh", "-c", "sh /render-vcl.sh /etc/varnish/edge.vcl.in /tmp/edge.vcl && exec /usr/local/bin/docker-varnish-entrypoint \"$$@\"", "--"]
+    command: ["-p", "default_ttl=${EDGE_CACHE_DEFAULT_TTL:-60}"]
     depends_on:
       - wordpress
     environment:
       VARNISH_SIZE: 100M
-      ROLE_HEADER: ${EDGE_ROLE_HEADER:-X-Example-Role}
+      EDGE_ROLE_HEADER: ${EDGE_ROLE_HEADER:-X-Example-Role}
     volumes:
-      - ./varnish/default.vcl:/etc/varnish/default.vcl:ro
-      - ./varnish/edge.vcl:/etc/varnish/edge.vcl.in:ro
+      - ./edge/varnish/default.vcl:/etc/varnish/default.vcl:ro
+      - ./edge/varnish/edge.vcl:/etc/varnish/edge.vcl.in:ro
+      - ./edge/varnish/render-vcl.sh:/render-vcl.sh:ro
 
-  # The edge in front of the website: verifies the login cookie on every request, sets X-Example-Role.
+  # Verifies the login cookie on every request, sets the role header.
   haproxy:
     image: haproxy:3.2
     ports:
@@ -144,17 +148,16 @@ services:
     depends_on:
       - varnish
     environment:
-      # Everything environment-specific for haproxy.cfg. Defaults are the prototype's; set the
-      # EDGE_* variables in .env to point the edge at a real community app and IdP.
-      LOGIN_COOKIE_NAME: ${EDGE_LOGIN_COOKIE_NAME:-example_login}
-      LOGIN_COOKIE_KEY: ${LOGIN_COOKIE_KEY:-ZGVtby1sb2dpbi1jb29raWUta2V5LTMyLWJ5dGVzISE=}
-      OIDC_ISSUER: ${EDGE_OIDC_ISSUER:-http://auth.example.localhost:8080/realms/example}
-      ROLE_CLAIM: ${EDGE_ROLE_CLAIM:-example_role}
-      ROLE_HEADER: ${EDGE_ROLE_HEADER:-X-Example-Role}
-      REFRESH_URL: ${EDGE_REFRESH_URL:-http://community.example.localhost:8001/auth/refresh}
+      EDGE_LOGIN_COOKIE_NAME: ${EDGE_LOGIN_COOKIE_NAME:-example_login}
+      EDGE_LOGIN_COOKIE_KEY: ${EDGE_LOGIN_COOKIE_KEY:-ZGVtby1sb2dpbi1jb29raWUta2V5LTMyLWJ5dGVzISE=}
+      EDGE_OIDC_ISSUER: ${EDGE_OIDC_ISSUER:-http://auth.example.localhost:8080/realms/example}
+      EDGE_IDP_PUBLIC_KEY_FILE: /usr/local/etc/haproxy/idp-public.pem
+      EDGE_ROLE_CLAIM: ${EDGE_ROLE_CLAIM:-example_role}
+      EDGE_ROLE_HEADER: ${EDGE_ROLE_HEADER:-X-Example-Role}
+      EDGE_REFRESH_URL: ${EDGE_REFRESH_URL:-http://community.example.localhost:8001/auth/refresh}
     volumes:
-      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-      - ./haproxy/idp-public.pem:/usr/local/etc/haproxy/idp-public.pem:ro
+      - ./edge/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./edge/haproxy/idp-public.pem:/usr/local/etc/haproxy/idp-public.pem:ro
 
 volumes:
   db-data:

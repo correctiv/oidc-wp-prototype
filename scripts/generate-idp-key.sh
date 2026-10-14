@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 openssl genrsa -traditional -out "$tmp/key.pem" 2048 2>/dev/null
 openssl req -new -x509 -key "$tmp/key.pem" -days 3650 -subj "/CN=example-idp-demo" -out "$tmp/cert.pem" 2>/dev/null
-openssl rsa -in "$tmp/key.pem" -pubout -out haproxy/idp-public.pem 2>/dev/null
+openssl rsa -in "$tmp/key.pem" -pubout -out edge/haproxy/idp-public.pem 2>/dev/null
 python3 - "$tmp/key.pem" "$tmp/cert.pem" <<'PY'
 import json, sys, re
 strip = lambda pem: re.sub(r'-----[A-Z ]+-----|\s', '', open(pem).read())
@@ -34,4 +34,4 @@ json.dump(realm, open(p, 'w'), indent=2, ensure_ascii=False)
 open(p, 'a').write('\n')
 PY
 rm -rf "$tmp"
-echo "wrote haproxy/idp-public.pem and the rsa-demo key provider in keycloak/realm-example.json"
+echo "wrote edge/haproxy/idp-public.pem and the rsa-demo key provider in keycloak/realm-example.json"

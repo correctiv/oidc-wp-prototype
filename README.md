@@ -65,7 +65,7 @@ Every account has a level; the community app refuses a login whose token carries
 ```bash
 scripts/demo.sh                 # curl checks (cache, header hygiene, forged tokens, PKCE) + login/logout flows for all users
 scripts/demo.sh --with-refresh  # additionally silent refresh and the refresh failure case (sets the id_token lifetime to 5s in Keycloak for a moment)
-scripts/varnishtest.sh          # VCL tests (varnish/tests/edge.vtc) with a mocked WordPress backend
+scripts/varnishtest.sh          # VCL tests (edge/varnish/tests/edge.vtc) with a mocked WordPress backend
 node scripts/login-flow.mjs login anna   # a single flow, shows every redirect hop and which cookies go where
 cd auth && npm test                      # unit tests for the auth-state cookie and return-URL handling
 ```
@@ -155,20 +155,20 @@ sequenceDiagram
 
 ## What each piece does
 
-### HAProxy (`haproxy/haproxy.cfg`)
+### HAProxy (`edge/haproxy/haproxy.cfg`)
 
 | Step | Behaviour |
 | --- | --- |
-| Decrypt | `req.cook(example_login)` is `nonce.ciphertext.tag`; `field()` splits it, `aes_gcm_dec(256, …)` with `LOGIN_COOKIE_KEY` from the environment yields the `id_token`. A wrong key, a tampered blob or plain text yields an empty token. |
+| Decrypt | `req.cook(example_login)` is `nonce.ciphertext.tag`; `field()` splits it, `aes_gcm_dec(256, …)` with `EDGE_LOGIN_COOKIE_KEY` from the environment yields the `id_token`. A wrong key, a tampered blob or plain text yields an empty token. |
 | Token check | `jwt_header_query` pins `RS256`, `jwt_verify` with `idp-public.pem`, `jwt_payload_query` checks `iss` and reads `exp` and `example_role`. Missing, tampered or wrong issuer → `none`. |
 | Level | The claim value as issued, checked only for shape (`^[A-Za-z0-9_-]{1,32}$`) so the header and cache key never carry arbitrary text. The edge does not know which levels exist; adding one is a change for the IdP and the website only. |
 | Expiry | `exp` compared with `date()`. Expired but otherwise valid token on a `GET` with `Accept: text/html` → 302 to the community app's `/auth/refresh` with the current URL as `next`. The community app's URL and origin are the literals in the config that have to match the environment. |
 | Hygiene | `X-Example-Role` from the client is deleted; the login cookie is removed from the `Cookie` header (other cookies pass); the header is set from the verified role only. |
 | Key material | The IdP's public key as a PEM file, and the symmetric cookie key as an environment variable. Identity providers rotate signing keys, so a real deployment needs a small job that fetches the JWKS, writes the PEM and reloads HAProxy. The cookie key is rotated by hand together with the community app. `scripts/generate-idp-key.sh` produces the demo signing pair; `openssl rand -base64 32` a cookie key. |
 
-### Varnish (`varnish/edge.vcl`)
+### Varnish (`edge/varnish/edge.vcl`)
 
-Trusts the role header because only HAProxy can reach it; a missing header is `none`. Which levels exist is not Varnish's business: a new level is simply another cache entry. VCL cannot read the environment, so `edge.vcl` is a template with a `${ROLE_HEADER}` placeholder that the Varnish service's entrypoint renders with `sed` at start (and `tests/edge.vtc` renders the same way); `default.vcl` includes the rendered file. Hashes on URL, host and role; assets under `/wp-content/` and `/wp-includes/` without the role. Bypasses the cache for non-GET, `/wp-admin`, `/wp-login.php` and requests with a WordPress login cookie. Drops `Set-Cookie` from cacheable responses and turns non-200 into a short hit-for-miss. Debug headers: `X-Cache`, `X-Cache-Key`, `X-Example-Role`. Plain `varnish:7.7` image, no extra vmods.
+Trusts the role header because only HAProxy can reach it; a missing header is `none`. Which levels exist is not Varnish's business: a new level is simply another cache entry. VCL cannot read the environment, so `edge.vcl` is a template with `${EDGE_*}` placeholders that `edge/varnish/render-vcl.sh` fills from the environment before `varnishd` starts; the Compose entrypoint and `tests/edge.vtc` both call it. Hashes on URL, host and role; assets under `/wp-content/` and `/wp-includes/` without the role. Bypasses the cache for non-GET, `/wp-admin`, `/wp-login.php` and requests with a WordPress login cookie. Drops `Set-Cookie` from cacheable responses and turns non-200 into a short hit-for-miss. Debug headers: `X-Cache`, `X-Cache-Key`, `X-Example-Role`. Plain `varnish:7.7` image, no extra vmods.
 
 ### Community app stand-in (`auth/`)
 
@@ -193,38 +193,24 @@ The login and logout links point at the community app (`EXAMPLE_COMMUNITY_URL`, 
 
 Realm `example` with a fixed RSA signing key (so HAProxy can hold the matching public key), client `community-app` (confidential, PKCE S256, `basic` scope only, redirect URI on the community host, post-logout URIs on both hosts), a mapper that puts the user attribute `example_role` into the `id_token`, a mapper that exposes the username via userinfo only, and the three demo users. `accessTokenLifespan` (900 s) is also the `id_token` lifetime and therefore the website's session length.
 
-## Pointing the local edge at a real environment
+## The edge as a handover package
 
-Everything environment-specific in `haproxy/haproxy.cfg` comes from the environment, so the same
-config can check a cookie issued by a real community app and IdP. Set these in `.env`
-(see `.env.example` for the full list), put the IdP's public key in `haproxy/idp-public.pem`, and
-restart HAProxy:
+Everything HAProxy and Varnish need lives in [`edge/`](edge/): the HAProxy config, the VCL
+template with its render script, the key tooling, `edge.env.example` with every `EDGE_*`
+variable, and a README for the people who run it. The Compose file consumes that directory
+exactly as a deployment would, so what is tested here is what gets handed over.
 
-| Variable | Meaning |
-| --- | --- |
-| `EDGE_LOGIN_COOKIE_NAME` | cookie name, e.g. `__Secure-example_login` |
-| `LOGIN_COOKIE_KEY` | the AES key the community app encrypts with |
-| `EDGE_OIDC_ISSUER` | expected `iss` |
-| `EDGE_ROLE_CLAIM` | the claim holding the level |
-| `EDGE_ROLE_HEADER` | the header carrying the level to Varnish and WordPress; the one value all three teams share |
-| `EDGE_REFRESH_URL` | the community app's silent-refresh endpoint |
-
-`scripts/fetch-idp-key.sh <jwks-url> > haproxy/idp-public.pem` converts the IdP's JWKS into the
-PEM file HAProxy needs; it is also the job a real deployment runs on key rotation. HAProxy
-verifies against one key, so a rotation window needs a second `jwt_verify` attempt with the
-previous key.
-
+Setting the `EDGE_*` variables in `.env` points the local edge at a real community app and IdP.
 Then log in at the real community app in a browser, copy the cookie value from the developer
 tools, and check it against the local edge:
 
 ```bash
-curl -s -o /dev/null -D - -b '__Secure-example_login=<value>' http://www.example.localhost:8000/ | grep -i x-example-role
+curl -s -o /dev/null -D - -b '<cookie name>=<value>' http://www.example.localhost:8000/ | grep -i <role header>
 ```
 
-That exercises decryption, signature, issuer, expiry and the claim, which is the whole
-HAProxy side of the contract. A browser cannot do the same against the local edge: it sends a
-cookie for the real parent domain only to hosts under that domain, and a `__Secure-` cookie only
-over https.
+That exercises decryption, signature, issuer, expiry and the claim, which is the whole HAProxy
+side of the contract. A browser cannot do the same against the local edge: it sends a cookie for
+the real parent domain only to hosts under that domain, and a `__Secure-` cookie only over https.
 
 ## Pitfalls of the local environment
 
@@ -249,7 +235,7 @@ MIT, see [LICENSE](LICENSE). The demo secrets, passwords and the signing key in 
 - **A different identity provider.** Same flow with any OIDC provider that can put a flat role claim into the `id_token`. With Zitadel, for example, the roles claim is a nested object under `urn:zitadel:iam:org:project:roles`, which HAProxy's JSON path handling will not read comfortably; an Action that adds a flat `example_role` claim keeps the HAProxy rule a one-liner. Request only `openid` plus the roles scope. Every account must carry one of the known levels; the community app refuses logins without one.
 - **Key rotation.** HAProxy needs the IdP's public key as a file. A small job fetching the JWKS, converting to PEM and reloading HAProxy, with the old key kept during the grace period.
 - **Subdomain inventory.** The login cookie is sent to every subdomain of the parent domain, including anything CNAMEd to a third party. Know the list. Such a host cannot read the cookie; what it could still do is replay it against the website and read gated content as that user for at most one token lifetime.
-- **Cookie key rotation.** `LOGIN_COOKIE_KEY` lives in the community app and on every HAProxy node. Rotate by letting HAProxy accept two keys for one cookie lifetime (a second `aes_gcm_dec` attempt), then switching the community app.
+- **Cookie key rotation.** `EDGE_LOGIN_COOKIE_KEY` lives in the community app and on every HAProxy node. Rotate by letting HAProxy accept two keys for one cookie lifetime (a second `aes_gcm_dec` attempt), then switching the community app.
 - **Cookie attributes.** Login cookie: `__Secure-` prefix, `Secure`, `HttpOnly`, `SameSite=Lax` (or `Strict`, everything is one site), `Domain` set to the parent domain; deleting on logout must use the same `Domain`. Community session: `__Host-` prefix, so no subdomain can set or shadow it.
 - **Client-side calls and CORS.** `/contact/me` works because the two hosts are the same site; the browser sends the community app's `SameSite=Lax` cookie with the fetch. The community app must echo the website's exact origin, never `*`, together with `Access-Control-Allow-Credentials`. Anything under `/contact/*` is personal and must stay `no-store`.
 - **Session length and revocation.** A role change takes effect when the `id_token` expires or the user visits the community app again. Pick the lifetime accordingly, or have the community app refresh the cookie from its own refresh token.
@@ -265,12 +251,14 @@ MIT, see [LICENSE](LICENSE). The demo secrets, passwords and the signing key in 
 ```
 docker-compose.yml           stack: db, wordpress, wp-init, keycloak, auth, varnish, haproxy
 .env.example                 secrets and TTLs (defaults also in compose)
-haproxy/haproxy.cfg          id_token verification, X-Example-Role, cookie stripping, refresh redirect
-haproxy/idp-public.pem       the IdP's public key (demo pair, see scripts/generate-idp-key.sh)
-keycloak/realm-example.json  realm with fixed signing key, client community-app, role mapper, demo users
-varnish/default.vcl          backend wiring
-varnish/edge.vcl             cache per role, bypass rules, response hygiene (template: ${ROLE_HEADER})
-varnish/tests/edge.vtc       varnishtest with a mocked WordPress backend
+edge/README.md               the handover package: what the edge needs and how to run it
+edge/edge.env.example        every EDGE_* variable with the prototype's values
+edge/haproxy/haproxy.cfg     cookie decryption, id_token verification, role header, cookie stripping, refresh redirect
+edge/haproxy/idp-public.pem  the IdP's public key (demo pair, see scripts/generate-idp-key.sh)
+edge/varnish/edge.vcl        cache per role, bypass rules, response hygiene (template, rendered by render-vcl.sh)
+edge/varnish/default.vcl     example backend wiring
+edge/varnish/tests/edge.vtc  varnishtest with a mocked WordPress backend
+edge/bin/fetch-idp-key.sh    JWKS to PEM for HAProxy
 auth/src/index.js            environment, status page, routes /auth/*
 auth/src/oidc.js             openid-client: discovery, PKCE, code exchange, id_token validation
 auth/src/state.js            auth-state cookie, return-URL allowlist, cookie parsing
@@ -278,7 +266,7 @@ auth/test/                   node --test
 wordpress/plugins/           example-role (reads the header, shortcodes)
 wordpress/init.sh, content/  wp-cli setup and demo pages
 scripts/demo.sh              curl checks + flows
-scripts/varnishtest.sh       runs the VCL tests inside the Varnish image
+scripts/varnishtest.sh       runs edge/varnish/tests inside the Varnish image
 scripts/login-flow.mjs       browser simulation: login, logout, refresh, refresh-fail
 scripts/generate-idp-key.sh  regenerates the demo signing key pair
 ```
